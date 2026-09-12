@@ -157,7 +157,7 @@ public sealed class DoubaoTTSRuntimeSettings
     private const string DefaultAudioFormat = "pcm";
     private const string DefaultVoiceInstruction = "请用自然、亲切、清晰的语气说话。";
     private const string DefaultDeepSeekVoiceInstructionPrompt =
-        "你是数字人语音导演。请根据用户话语和面部情绪上下文，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。";
+        "你是数字人语音导演。请根据用户话语，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。";
 
     public string apiKey;
     public string appId;
@@ -208,7 +208,6 @@ public sealed class VoiceFeatureRuntimeSettings
     public string pushToTalkKey = KeyCode.Space.ToString();
     public bool enablePushToTalk = true;
     public bool listenOnStart;
-    public bool includeEmotionInPrompt = true;
 }
 
 [Serializable]
@@ -708,7 +707,7 @@ public static class VoiceChatRuntimeConfigStore
             : source.voiceInstruction;
         target.enableDeepSeekVoiceInstruction = source.enableDeepSeekVoiceInstruction;
         target.deepSeekVoiceInstructionPrompt = string.IsNullOrWhiteSpace(source.deepSeekVoiceInstructionPrompt)
-            ? "你是数字人语音导演。请根据用户话语和面部情绪上下文，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。"
+            ? "你是数字人语音导演。请根据用户话语，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。"
             : source.deepSeekVoiceInstructionPrompt;
         target.useSectionId = source.useSectionId;
         target.minChunkChars = Mathf.Clamp(source.minChunkChars, 1, 120);
@@ -726,7 +725,6 @@ public static class VoiceChatRuntimeConfigStore
         target.pushToTalkKey = source.pushToTalkKey.ToString();
         target.enablePushToTalk = source.enablePushToTalk;
         target.listenOnStart = source.listenOnStart;
-        target.includeEmotionInPrompt = source.includeEmotionInPrompt;
     }
 
     private static void ApplyFeatures(VoiceChatController target, VoiceFeatureRuntimeSettings source)
@@ -747,7 +745,6 @@ public static class VoiceChatRuntimeConfigStore
 
         target.enablePushToTalk = source.enablePushToTalk;
         target.listenOnStart = source.listenOnStart;
-        target.includeEmotionInPrompt = source.includeEmotionInPrompt;
     }
 
     private static bool TryParseTtsProvider(string value, out TTSProvider provider)

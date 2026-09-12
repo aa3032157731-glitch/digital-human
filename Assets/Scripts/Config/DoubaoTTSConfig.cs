@@ -65,7 +65,7 @@ public class DoubaoTTSConfig : ScriptableObject
     [TextArea(3, 8)]
     [Tooltip("System prompt used for the optional DeepSeek voice-instruction classifier.")]
     public string deepSeekVoiceInstructionPrompt =
-        "你是数字人语音导演。请根据用户话语和面部情绪上下文，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。";
+        "你是数字人语音导演。请根据用户话语，为豆包语音合成模型2.0输出一句中文语音指令。只输出一句话，不要解释，不要包含引号，不要超过45个汉字。";
 
     [Tooltip("Use a stable section_id across short chunk requests so Doubao can reuse TTS 2.0 context.")]
     public bool useSectionId = true;

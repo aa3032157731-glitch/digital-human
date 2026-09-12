@@ -8,7 +8,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using MoodMe;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.Events;
@@ -64,19 +63,6 @@ public class VoiceChatController : MonoBehaviour
 
     [Tooltip("Find the first active or inactive Animator with the talk bool when no Animator is assigned.")]
     public bool autoFindTalkAnimator = true;
-
-    [Header("Emotion Recognition")]
-    [Tooltip("MoodMe emotions manager sampled while the user is holding push-to-talk.")]
-    public EmotionsManager emotionsManager;
-
-    [Tooltip("Find the first active or inactive MoodMe EmotionsManager when none is assigned.")]
-    public bool autoFindEmotionsManager = true;
-
-    [Tooltip("Append the captured emotion snapshot to each user message sent to DeepSeek.")]
-    public bool includeEmotionInPrompt = true;
-
-    [TextArea(2, 6)]
-    public string currentEmotionContext;
 
     [Header("Input")]
     [Tooltip("Hold this key to talk. Release to finish ASR and send the text to DeepSeek.")]
@@ -188,7 +174,6 @@ public class VoiceChatController : MonoBehaviour
     private readonly ConcurrentQueue<Action> mainThreadActions = new ConcurrentQueue<Action>();
     private readonly List<DeepSeekService.ChatMessage> history = new List<DeepSeekService.ChatMessage>();
     private readonly List<byte> micPcmBuffer = new List<byte>(8192);
-    private readonly EmotionSampleAccumulator emotionSamples = new EmotionSampleAccumulator();
     private readonly object conversationLock = new object();
     private CancellationTokenSource asrCts;
     private CancellationTokenSource turnCts;
@@ -210,7 +195,6 @@ public class VoiceChatController : MonoBehaviour
     private bool hasTalkBoolParameter;
     private bool hasTalkVariantParameter;
     private bool talkAnimatorWarningShown;
-    private EmotionSnapshot lastUserEmotionSnapshot;
 
     private void Awake()
     {
@@ -269,17 +253,7 @@ public class VoiceChatController : MonoBehaviour
 
         if (!enablePushToTalk)
         {
-            if (isListening)
-            {
-                CaptureEmotionSample();
-            }
-
             return;
-        }
-
-        if (isListening)
-        {
-            CaptureEmotionSample();
         }
 
         if (Input.GetKeyDown(pushToTalkKey))
@@ -325,7 +299,6 @@ public class VoiceChatController : MonoBehaviour
         currentAsrText = string.Empty;
         asrFinalHandled = false;
         micPcmBuffer.Clear();
-        ResetEmotionCapture();
 
         try
         {
@@ -340,7 +313,6 @@ public class VoiceChatController : MonoBehaviour
 
             StartMicrophone();
             isListening = true;
-            CaptureEmotionSample();
         }
         catch (Exception ex)
         {
@@ -356,8 +328,6 @@ public class VoiceChatController : MonoBehaviour
             return;
         }
 
-        CaptureEmotionSample();
-        FinalizeEmotionCapture();
         StopMicrophone();
         isListening = false;
 
@@ -760,11 +730,10 @@ public class VoiceChatController : MonoBehaviour
         asrFinalHandled = true;
         currentAsrText = text;
         onAsrFinal?.Invoke(text);
-        var emotionSnapshot = lastUserEmotionSnapshot;
-        _ = RunAssistantTurnAsync(text, emotionSnapshot);
+        _ = RunAssistantTurnAsync(text);
     }
 
-    private async Task RunAssistantTurnAsync(string userText, EmotionSnapshot emotionSnapshot)
+    private async Task RunAssistantTurnAsync(string userText)
     {
         turnCts?.Cancel();
         turnCts = new CancellationTokenSource();
@@ -783,15 +752,13 @@ public class VoiceChatController : MonoBehaviour
         try
         {
             EnsureMemoryStores();
-            var userMessageForPrompt = BuildUserMessageForPrompt(userText, emotionSnapshot);
             EnsureInitialKnowledgeBaseInjected();
             AppendUserMessage(userText);
             var conversation = BuildConversation(userText);
-            ApplyCurrentUserPromptMessage(conversation, userText, userMessageForPrompt);
             var runtimeSystemContext = BuildRuntimeSystemContext(userText, conversation.Count);
             var deepSeek = new DeepSeekService(deepSeekConfig);
             conversation = await ResolveAgentToolCallsAsync(deepSeek, conversation, runtimeSystemContext, userText, token);
-            var doubaoVoiceInstruction = await ResolveDoubaoVoiceInstructionAsync(deepSeek, userText, emotionSnapshot, token);
+            var doubaoVoiceInstruction = await ResolveDoubaoVoiceInstructionAsync(deepSeek, userText, token);
             assistantRecord = BeginAssistantMessage(out assistantSession, out assistantConversationGeneration);
 
             activeTtsService = CreateTtsService(doubaoVoiceInstruction);
@@ -894,7 +861,6 @@ public class VoiceChatController : MonoBehaviour
     private async Task<string> ResolveDoubaoVoiceInstructionAsync(
         DeepSeekService deepSeek,
         string userText,
-        EmotionSnapshot emotionSnapshot,
         CancellationToken cancellationToken)
     {
         if (ttsProvider != TTSProvider.Doubao)
@@ -914,7 +880,7 @@ public class VoiceChatController : MonoBehaviour
             return string.Empty;
         }
 
-        var fallback = BuildHeuristicDoubaoVoiceInstruction(emotionSnapshot);
+        var fallback = doubaoTtsConfig.voiceInstruction;
         if (!doubaoTtsConfig.enableDeepSeekVoiceInstruction || deepSeek == null)
         {
             LogDoubaoVoiceInstruction("fallback", fallback);
@@ -923,7 +889,7 @@ public class VoiceChatController : MonoBehaviour
 
         try
         {
-            var prompt = BuildDoubaoVoiceInstructionUserPrompt(userText, emotionSnapshot, fallback);
+            var prompt = BuildDoubaoVoiceInstructionUserPrompt(userText, fallback);
             var messages = new List<DeepSeekService.ChatMessage>
             {
                 new DeepSeekService.ChatMessage("user", prompt)
@@ -931,7 +897,7 @@ public class VoiceChatController : MonoBehaviour
             var result = await deepSeek.CompleteChatAsync(
                 messages,
                 cancellationToken,
-                doubaoTtsConfig.deepSeekVoiceInstructionPrompt);
+                doubaoTtsConfig.deepSeekVoiceInstructionPrompt?.Replace("用户话语和面部情绪上下文", "用户话语"));
 
             var instruction = SanitizeDoubaoVoiceInstruction(result?.content);
             if (string.IsNullOrWhiteSpace(instruction))
@@ -960,32 +926,8 @@ public class VoiceChatController : MonoBehaviour
         Debug.Log($"Doubao voice instruction ({source}): {instruction}");
     }
 
-    private string BuildHeuristicDoubaoVoiceInstruction(EmotionSnapshot emotionSnapshot)
-    {
-        if (emotionSnapshot.HasData)
-        {
-            if (emotionSnapshot.Sad >= 0.35f || emotionSnapshot.Scared >= 0.35f || emotionSnapshot.Angry >= 0.35f)
-            {
-                return "请用温柔、耐心、安抚的语气说话。";
-            }
-
-            if (emotionSnapshot.Happy >= 0.45f)
-            {
-                return "请用自然、轻快、友好的语气说话。";
-            }
-
-            if (emotionSnapshot.Surprised >= 0.4f)
-            {
-                return "请用清晰、有活力、略带惊喜的语气说话。";
-            }
-        }
-
-        return doubaoTtsConfig != null ? doubaoTtsConfig.voiceInstruction : string.Empty;
-    }
-
     private static string BuildDoubaoVoiceInstructionUserPrompt(
         string userText,
-        EmotionSnapshot emotionSnapshot,
         string fallback)
     {
         var builder = new StringBuilder();
@@ -994,8 +936,6 @@ public class VoiceChatController : MonoBehaviour
         builder.AppendLine("用户原话：");
         builder.AppendLine(userText ?? string.Empty);
         builder.AppendLine();
-        builder.AppendLine("用户面部情绪上下文：");
-        builder.AppendLine(emotionSnapshot.ToPromptText());
         if (!string.IsNullOrWhiteSpace(fallback))
         {
             builder.AppendLine();
@@ -1290,106 +1230,6 @@ public class VoiceChatController : MonoBehaviour
         return true;
     }
 
-    private bool ResolveEmotionsManager()
-    {
-        if (emotionsManager != null)
-        {
-            return true;
-        }
-
-        if (!autoFindEmotionsManager)
-        {
-            return false;
-        }
-
-        var managers = FindObjectsOfType<EmotionsManager>(true);
-        foreach (var manager in managers)
-        {
-            if (manager != null)
-            {
-                emotionsManager = manager;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private void ResetEmotionCapture()
-    {
-        emotionSamples.Reset();
-        currentEmotionContext = string.Empty;
-        ResolveEmotionsManager();
-    }
-
-    private void CaptureEmotionSample()
-    {
-        if (!includeEmotionInPrompt)
-        {
-            return;
-        }
-
-        if (emotionsManager == null && !ResolveEmotionsManager())
-        {
-            return;
-        }
-
-        emotionSamples.Add(emotionsManager);
-    }
-
-    private void FinalizeEmotionCapture()
-    {
-        lastUserEmotionSnapshot = emotionSamples.BuildSnapshot();
-        currentEmotionContext = lastUserEmotionSnapshot.HasData
-            ? lastUserEmotionSnapshot.ToPromptText()
-            : "Emotion recognition unavailable for this utterance.";
-    }
-
-    private string BuildUserMessageForPrompt(string userText, EmotionSnapshot emotionSnapshot)
-    {
-        if (!includeEmotionInPrompt || !emotionSnapshot.HasData)
-        {
-            return userText;
-        }
-
-        var builder = new StringBuilder();
-        builder.AppendLine(userText.Trim());
-        builder.AppendLine();
-        builder.AppendLine("[Emotion recognition captured during this utterance]");
-        builder.AppendLine(emotionSnapshot.ToPromptText());
-        builder.AppendLine("These emotion measurements are average facial-emotion scores captured from the user's face through the camera during this utterance. Treat them as visual, non-verbal context: if the user asks whether you can see them, you may answer yes. Use this context to adjust empathy, tone, and response style. Do not mention emotion labels or numeric scores unless the user explicitly asks about them or they are directly useful. Do not invent visual details beyond the provided facial emotion measurements.");
-        return builder.ToString().TrimEnd();
-    }
-
-    private void ApplyCurrentUserPromptMessage(
-        List<DeepSeekService.ChatMessage> conversation,
-        string displayUserText,
-        string promptUserText)
-    {
-        if (conversation == null || conversation.Count == 0 || string.IsNullOrWhiteSpace(promptUserText))
-        {
-            return;
-        }
-
-        for (var i = conversation.Count - 1; i >= 0; i--)
-        {
-            if (conversation[i].role != "user")
-            {
-                continue;
-            }
-
-            var message = conversation[i];
-            if (!string.Equals(message.content, displayUserText, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            message.content = promptUserText;
-            conversation[i] = message;
-            return;
-        }
-    }
-
     private void EnsureInitialKnowledgeBaseInjected()
     {
         if (!injectFullKnowledgeBaseOnNewConversation || !enablePersistentConversation || !enableKnowledgeBase)
@@ -1560,7 +1400,7 @@ public class VoiceChatController : MonoBehaviour
                 continue;
             }
 
-            history.Add(new DeepSeekService.ChatMessage(message.role, message.content));
+            history.Add(new DeepSeekService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
         }
     }
 
@@ -1735,7 +1575,7 @@ public class VoiceChatController : MonoBehaviour
                         continue;
                     }
 
-                    source.Add(new DeepSeekService.ChatMessage(message.role, message.content));
+                    source.Add(new DeepSeekService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
                 }
             }
         }
@@ -2410,166 +2250,6 @@ public class VoiceChatController : MonoBehaviour
         }
 
         return content.Substring(0, markerIndex).TrimEnd('\r', '\n');
-    }
-
-    private sealed class EmotionSampleAccumulator
-    {
-        private int sampleCount;
-        private float happy;
-        private float surprised;
-        private float scared;
-        private float angry;
-        private float disgust;
-        private float sad;
-        private float neutral;
-
-        public void Reset()
-        {
-            sampleCount = 0;
-            happy = 0f;
-            surprised = 0f;
-            scared = 0f;
-            angry = 0f;
-            disgust = 0f;
-            sad = 0f;
-            neutral = 0f;
-        }
-
-        public void Add(EmotionsManager manager)
-        {
-            if (manager == null)
-            {
-                return;
-            }
-
-            var sampleHappy = Mathf.Clamp01(manager.Happy);
-            var sampleSurprised = Mathf.Clamp01(manager.Surprised);
-            var sampleScared = Mathf.Clamp01(manager.Scared);
-            var sampleAngry = Mathf.Clamp01(manager.Angry);
-            var sampleDisgust = Mathf.Clamp01(manager.Disgust);
-            var sampleSad = Mathf.Clamp01(manager.Sad);
-            var sampleNeutral = Mathf.Clamp01(manager.Neutral);
-            var total = sampleHappy + sampleSurprised + sampleScared + sampleAngry + sampleDisgust + sampleSad + sampleNeutral;
-            if (total <= 0.0001f)
-            {
-                return;
-            }
-
-            sampleCount++;
-            happy += sampleHappy;
-            surprised += sampleSurprised;
-            scared += sampleScared;
-            angry += sampleAngry;
-            disgust += sampleDisgust;
-            sad += sampleSad;
-            neutral += sampleNeutral;
-        }
-
-        public EmotionSnapshot BuildSnapshot()
-        {
-            if (sampleCount <= 0)
-            {
-                return EmotionSnapshot.Empty;
-            }
-
-            var scale = 1f / sampleCount;
-            return EmotionSnapshot.FromAverages(
-                sampleCount,
-                happy * scale,
-                surprised * scale,
-                scared * scale,
-                angry * scale,
-                disgust * scale,
-                sad * scale,
-                neutral * scale);
-        }
-    }
-
-    private struct EmotionSnapshot
-    {
-        public static EmotionSnapshot Empty => new EmotionSnapshot { HasData = false };
-
-        public bool HasData;
-        public int SampleCount;
-        public float Happy;
-        public float Surprised;
-        public float Scared;
-        public float Angry;
-        public float Disgust;
-        public float Sad;
-        public float Neutral;
-        public float EmotionIndex;
-        public string DominantEmotion;
-        public float DominantValue;
-
-        public static EmotionSnapshot FromAverages(
-            int sampleCount,
-            float happy,
-            float surprised,
-            float scared,
-            float angry,
-            float disgust,
-            float sad,
-            float neutral)
-        {
-            var snapshot = new EmotionSnapshot
-            {
-                HasData = true,
-                SampleCount = sampleCount,
-                Happy = Mathf.Clamp01(happy),
-                Surprised = Mathf.Clamp01(surprised),
-                Scared = Mathf.Clamp01(scared),
-                Angry = Mathf.Clamp01(angry),
-                Disgust = Mathf.Clamp01(disgust),
-                Sad = Mathf.Clamp01(sad),
-                Neutral = Mathf.Clamp01(neutral)
-            };
-
-            snapshot.EmotionIndex = Mathf.Clamp01(
-                (((3f * snapshot.Happy + snapshot.Surprised
-                    - (snapshot.Sad + snapshot.Scared + snapshot.Disgust + snapshot.Angry)) / 3f) + 1f) / 2f);
-            snapshot.SetDominantEmotion();
-            return snapshot;
-        }
-
-        public string ToPromptText()
-        {
-            if (!HasData)
-            {
-                return "No emotion sample captured.";
-            }
-
-            return $"samples={SampleCount}; dominant={DominantEmotion} {FormatPercent(DominantValue)}; "
-                + $"Happy={FormatPercent(Happy)}, Surprised={FormatPercent(Surprised)}, Scared={FormatPercent(Scared)}, "
-                + $"Angry={FormatPercent(Angry)}, Disgust={FormatPercent(Disgust)}, Sad={FormatPercent(Sad)}, "
-                + $"Neutral={FormatPercent(Neutral)}, EmotionIndex={FormatPercent(EmotionIndex)} (higher means more positive).";
-        }
-
-        private void SetDominantEmotion()
-        {
-            DominantEmotion = "Happy";
-            DominantValue = Happy;
-            ConsiderDominant("Surprised", Surprised);
-            ConsiderDominant("Scared", Scared);
-            ConsiderDominant("Angry", Angry);
-            ConsiderDominant("Disgust", Disgust);
-            ConsiderDominant("Sad", Sad);
-            ConsiderDominant("Neutral", Neutral);
-        }
-
-        private void ConsiderDominant(string name, float value)
-        {
-            if (value > DominantValue)
-            {
-                DominantEmotion = name;
-                DominantValue = value;
-            }
-        }
-
-        private static string FormatPercent(float value)
-        {
-            return Mathf.RoundToInt(Mathf.Clamp01(value) * 100f) + "%";
-        }
     }
 
     private void ReportError(string message)

@@ -425,7 +425,6 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
         BindInput("Feature_PushToTalkKey", s => s.features.pushToTalkKey, (s, v) => s.features.pushToTalkKey = v);
         BindToggle("Feature_EnablePushToTalk", s => s.features.enablePushToTalk, (s, v) => s.features.enablePushToTalk = v);
         BindToggle("Feature_ListenOnStart", s => s.features.listenOnStart, (s, v) => s.features.listenOnStart = v);
-        BindToggle("Feature_IncludeEmotionInPrompt", s => s.features.includeEmotionInPrompt, (s, v) => s.features.includeEmotionInPrompt = v);
 
         BindToggle("Memory_EnablePersistentConversation", s => s.memory.enablePersistentConversation, (s, v) => s.memory.enablePersistentConversation = v);
         BindInput("Memory_PersistentDataFolder", s => s.memory.persistentDataFolder, (s, v) => s.memory.persistentDataFolder = v);
