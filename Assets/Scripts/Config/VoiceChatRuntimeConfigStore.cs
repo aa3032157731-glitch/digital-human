@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using UnityEngine;
@@ -6,7 +7,10 @@ using UnityEngine;
 [Serializable]
 public sealed class RuntimeVoiceChatSettings
 {
-    public int schemaVersion = 3;
+    public int schemaVersion = 4;
+    public List<ChatModelProfile> modelProfiles = new List<ChatModelProfile>();
+    public string activeModelProfileId;
+    public bool readRepliesAloud = true;
     public DeepSeekRuntimeSettings deepSeek = new DeepSeekRuntimeSettings();
     public BaiduSearchRuntimeSettings baiduSearch = new BaiduSearchRuntimeSettings();
     public XFASRRuntimeSettings xunfeiAsr = new XFASRRuntimeSettings();
@@ -38,7 +42,20 @@ public sealed class RuntimeVoiceChatSettings
             knowledge.injectFullKnowledgeBaseOnNewConversation = true;
         }
 
-        schemaVersion = 3;
+        if (modelProfiles == null) modelProfiles = new List<ChatModelProfile>();
+        modelProfiles.RemoveAll(p => p == null);
+        if (modelProfiles.Count == 0) modelProfiles.Add(ChatModelProfile.FromLegacy(deepSeek));
+        var ids = new HashSet<string>();
+        foreach (var profile in modelProfiles)
+        {
+            if (string.IsNullOrEmpty(profile.id) || !ids.Add(profile.id))
+            {
+                profile.id = Guid.NewGuid().ToString("N");
+                ids.Add(profile.id);
+            }
+        }
+        if (!modelProfiles.Exists(p => p.id == activeModelProfileId)) activeModelProfileId = modelProfiles[0].id;
+        schemaVersion = 4;
     }
 }
 
@@ -353,6 +370,12 @@ public static class VoiceChatRuntimeConfigStore
         }
 
         CaptureDeepSeek(controller.deepSeekConfig, settings.deepSeek);
+        settings.modelProfiles.Clear();
+        if (controller.modelProfiles != null)
+            foreach (var profile in controller.modelProfiles) settings.modelProfiles.Add(profile.Copy());
+        settings.activeModelProfileId = controller.activeModelProfileId;
+        settings.readRepliesAloud = controller.readRepliesAloud;
+        settings.EnsureDefaults();
         CaptureBaiduSearch(controller.baiduSearchConfig, settings.baiduSearch);
         CaptureAsr(controller.asrConfig, settings.xunfeiAsr);
         CaptureSuperSmartTts(controller.ttsConfig, settings.xunfeiSuperSmartTts);
@@ -401,6 +424,9 @@ public static class VoiceChatRuntimeConfigStore
         settings.EnsureDefaults();
         EnsureRuntimeConfigInstances(controller);
         ApplyDeepSeek(controller.deepSeekConfig, settings.deepSeek);
+        controller.modelProfiles = settings.modelProfiles.ConvertAll(p => p.Copy());
+        controller.activeModelProfileId = settings.activeModelProfileId;
+        controller.readRepliesAloud = settings.readRepliesAloud;
         ApplyBaiduSearch(controller.baiduSearchConfig, settings.baiduSearch);
         ApplyAsr(controller.asrConfig, settings.xunfeiAsr);
         ApplySuperSmartTts(controller.ttsConfig, settings.xunfeiSuperSmartTts);

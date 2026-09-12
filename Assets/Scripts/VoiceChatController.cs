@@ -11,6 +11,8 @@ using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 public enum TTSProvider
 {
@@ -29,6 +31,52 @@ public class VoiceChatController : MonoBehaviour
     [Header("Configs")]
     public XFASRConfig asrConfig;
     public DeepSeekConfig deepSeekConfig;
+    [NonSerialized] public List<ChatModelProfile> modelProfiles = new List<ChatModelProfile>();
+    [NonSerialized] public string activeModelProfileId;
+    public bool readRepliesAloud = true;
+    public bool IsGenerating { get; private set; }
+    public string ChatStatus { get; private set; } = "就绪";
+    private int asrGeneration;
+    private bool asrStarting;
+
+    public ChatModelProfile ActiveModelProfile => modelProfiles.Find(p => p.id == activeModelProfileId);
+
+    public bool SubmitTextMessage(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        try { if (ActiveModelProfile == null) throw new InvalidOperationException("请先配置大模型接口。"); ActiveModelProfile.Validate(); }
+        catch (Exception ex) { ChatStatus = ex.Message; return false; }
+        CancelVoiceInput();
+        InterruptAssistantOutput();
+        _ = RunAssistantTurnAsync(text.Trim());
+        return true;
+    }
+
+    private void CancelVoiceInput()
+    {
+        ++asrGeneration;
+        asrStarting = false;
+        asrFinalHandled = true;
+        asrCts?.Cancel();
+        StopMicrophone();
+        isListening = false;
+        asrService?.Dispose();
+        asrService = null;
+    }
+
+    public void SetReadRepliesAloud(bool enabled)
+    {
+        readRepliesAloud = enabled;
+        if (!enabled)
+        {
+            streamingPlayer?.StopAndClear();
+            isSpeaking = false;
+            SetTalkAnimation(false);
+            if (ttsService != null) _ = ttsService.CancelAsync();
+        }
+        VoiceChatRuntimeConfigStore.SaveSettings(CaptureRuntimeSettings());
+    }
+
     public BaiduSearchConfig baiduSearchConfig;
 
     [Header("TTS Provider")]
@@ -172,7 +220,7 @@ public class VoiceChatController : MonoBehaviour
     public UnityEvent<string> onKnowledgeBaseChanged;
 
     private readonly ConcurrentQueue<Action> mainThreadActions = new ConcurrentQueue<Action>();
-    private readonly List<DeepSeekService.ChatMessage> history = new List<DeepSeekService.ChatMessage>();
+    private readonly List<ChatCompletionService.ChatMessage> history = new List<ChatCompletionService.ChatMessage>();
     private readonly List<byte> micPcmBuffer = new List<byte>(8192);
     private readonly object conversationLock = new object();
     private CancellationTokenSource asrCts;
@@ -251,6 +299,12 @@ public class VoiceChatController : MonoBehaviour
             action?.Invoke();
         }
 
+        var selected = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+        if (selected != null && selected.GetComponentInParent<InputField>() != null)
+        {
+            if (Input.GetKeyUp(pushToTalkKey) && isListening) StopListening();
+            return;
+        }
         if (!enablePushToTalk)
         {
             return;
@@ -263,12 +317,15 @@ public class VoiceChatController : MonoBehaviour
 
         if (Input.GetKeyUp(pushToTalkKey))
         {
-            StopListening();
+            if (asrStarting) CancelVoiceInput();
+            else StopListening();
         }
     }
 
     private async void OnDestroy()
     {
+        ++asrGeneration;
+        InterruptAssistantOutput();
         UnsubscribeStreamingPlayer();
         SetTalkAnimation(false);
         StopMicrophone();
@@ -290,11 +347,9 @@ public class VoiceChatController : MonoBehaviour
 
     public async void StartListening()
     {
-        if (isListening)
-        {
-            return;
-        }
-
+        if (isListening || asrStarting) return;
+        var generation = ++asrGeneration;
+        asrStarting = true;
         InterruptAssistantOutput();
         currentAsrText = string.Empty;
         asrFinalHandled = false;
@@ -304,18 +359,21 @@ public class VoiceChatController : MonoBehaviour
         {
             asrCts = new CancellationTokenSource();
             asrService = new XFASRService(asrConfig);
-            asrService.PartialResult += text => EnqueueMainThread(() => HandleAsrPartial(text));
-            asrService.FinalResult += text => EnqueueMainThread(() => HandleAsrFinal(text));
-            asrService.Error += message => EnqueueMainThread(() => ReportError(message));
-            asrService.SessionEnded += () => EnqueueMainThread(() => isListening = false);
+            asrService.PartialResult += text => EnqueueMainThread(() => { if (generation == asrGeneration) HandleAsrPartial(text); });
+            asrService.FinalResult += text => EnqueueMainThread(() => { if (generation == asrGeneration) HandleAsrFinal(text); });
+            asrService.Error += message => EnqueueMainThread(() => { if (generation == asrGeneration) ReportError(message); });
+            asrService.SessionEnded += () => EnqueueMainThread(() => { if (generation == asrGeneration) isListening = false; });
 
             await asrService.StartAsync(asrCts.Token);
-
+            if (generation != asrGeneration) return;
+            asrStarting = false;
             StartMicrophone();
             isListening = true;
         }
         catch (Exception ex)
         {
+            if (generation != asrGeneration) return;
+            asrStarting = false;
             isListening = false;
             ReportError($"Start listening failed: {ex.Message}");
         }
@@ -323,6 +381,7 @@ public class VoiceChatController : MonoBehaviour
 
     public async void StopListening()
     {
+        var generation = asrGeneration;
         if (!isListening)
         {
             return;
@@ -342,7 +401,7 @@ public class VoiceChatController : MonoBehaviour
         }
         catch (Exception ex)
         {
-            ReportError($"Stop listening failed: {ex.Message}");
+            if (generation == asrGeneration) ReportError($"Stop listening failed: {ex.Message}");
         }
     }
 
@@ -350,6 +409,8 @@ public class VoiceChatController : MonoBehaviour
     {
         turnCts?.Cancel();
         ttsPlaybackGeneration++;
+        IsGenerating = false;
+        ChatStatus = "已停止";
         isSpeaking = false;
         SetTalkAnimation(false);
 
@@ -361,7 +422,6 @@ public class VoiceChatController : MonoBehaviour
         if (ttsService != null)
         {
             _ = ttsService.CancelAsync();
-            ttsService.Dispose();
             ttsService = null;
         }
     }
@@ -730,136 +790,138 @@ public class VoiceChatController : MonoBehaviour
         asrFinalHandled = true;
         currentAsrText = text;
         onAsrFinal?.Invoke(text);
-        _ = RunAssistantTurnAsync(text);
+        SubmitTextMessage(text);
     }
 
     private async Task RunAssistantTurnAsync(string userText)
     {
-        turnCts?.Cancel();
-        turnCts = new CancellationTokenSource();
-        var token = turnCts.Token;
-        var playbackGeneration = ++ttsPlaybackGeneration;
-        ITTSService activeTtsService = null;
-        ChatMessageRecord assistantRecord = null;
-        ChatSessionRecord assistantSession = null;
-        var assistantConversationGeneration = 0;
-        var assistantBuilder = new StringBuilder();
-        var deepSeekCompleted = false;
+        var cancellation = new CancellationTokenSource();
+        turnCts = cancellation;
+        var token = cancellation.Token;
+        var generation = ++ttsPlaybackGeneration;
+        var model = ActiveModelProfile.Copy();
+        var service = new ChatCompletionService(model, deepSeekConfig);
+        ITTSService audio = null;
+        ChatMessageRecord record = null;
+        ChatSessionRecord session = null;
+        var conversationGeneration = 0;
+        var answer = new StringBuilder();
+        bool audioFailed = false;
+        bool speak = readRepliesAloud;
+        IsGenerating = true;
+        ChatStatus = "正在回答…";
         currentAssistantText = string.Empty;
-        isSpeaking = false;
-        SetTalkAnimation(false);
-
         try
         {
             EnsureMemoryStores();
             EnsureInitialKnowledgeBaseInjected();
             AppendUserMessage(userText);
             var conversation = BuildConversation(userText);
-            var runtimeSystemContext = BuildRuntimeSystemContext(userText, conversation.Count);
-            var deepSeek = new DeepSeekService(deepSeekConfig);
-            conversation = await ResolveAgentToolCallsAsync(deepSeek, conversation, runtimeSystemContext, userText, token);
-            var doubaoVoiceInstruction = await ResolveDoubaoVoiceInstructionAsync(deepSeek, userText, token);
-            assistantRecord = BeginAssistantMessage(out assistantSession, out assistantConversationGeneration);
-
-            activeTtsService = CreateTtsService(doubaoVoiceInstruction);
-            ttsService = activeTtsService;
-            activeTtsService.AudioChunkReceived += bytes =>
-                EnqueueMainThread(() =>
-                {
-                    if (playbackGeneration == ttsPlaybackGeneration)
-                    {
-                        streamingPlayer.AppendPcm16LittleEndian(bytes);
-                    }
-                });
-            activeTtsService.Error += message =>
-                EnqueueMainThread(() =>
-                {
-                    if (playbackGeneration == ttsPlaybackGeneration)
-                    {
-                        ReportError(message);
-                    }
-                });
-            activeTtsService.Completed += () =>
-                EnqueueMainThread(() =>
-                {
-                    if (playbackGeneration == ttsPlaybackGeneration)
-                    {
-                        streamingPlayer.EndStream();
-                    }
-                });
-
-            streamingPlayer.BeginStream(activeTtsService.OutputSampleRate, 1);
-            await activeTtsService.StartAsync(token);
-
-            await deepSeek.StreamChatAsync(
-                conversation,
-                delta =>
-                {
-                    assistantBuilder.Append(delta);
-                    var deltaCopy = delta;
-                    AppendAssistantDelta(assistantSession, assistantConversationGeneration, assistantRecord, deltaCopy);
-                    activeTtsService.EnqueueText(deltaCopy);
-                    EnqueueMainThread(() =>
-                    {
-                        currentAssistantText += deltaCopy;
-                        onAssistantDelta?.Invoke(deltaCopy);
-                    });
-                },
-                token,
-                runtimeSystemContext);
-            deepSeekCompleted = true;
-
-            activeTtsService.CompleteInput();
-            await activeTtsService.WaitForCompletionAsync();
-
-            var assistantText = assistantBuilder.ToString();
-            CompleteAssistantMessage(assistantSession, assistantConversationGeneration, assistantRecord, assistantText, "completed");
-
-            if (!string.IsNullOrWhiteSpace(assistantText))
+            var context = BuildRuntimeSystemContext(userText, conversation.Count);
+            record = BeginAssistantMessage(out session, out conversationGeneration);
+            conversation = await ResolveAgentToolCallsAsync(service, conversation, context, userText, token);
+            token.ThrowIfCancellationRequested();
+            if (speak)
             {
-                if (!enablePersistentConversation)
+                try
                 {
-                    AddHistory(userText, assistantText);
+                    var instruction = await ResolveDoubaoVoiceInstructionAsync(service, userText, token);
+                    token.ThrowIfCancellationRequested();
+                    audio = CreateTtsService(instruction);
+                    ttsService = audio;
+                    audio.AudioChunkReceived += bytes => EnqueueMainThread(() =>
+                    {
+                        if (generation == ttsPlaybackGeneration && readRepliesAloud && !audioFailed)
+                            streamingPlayer?.AppendPcm16LittleEndian(bytes);
+                    });
+                    audio.Error += message => EnqueueMainThread(() =>
+                    {
+                        if (generation != ttsPlaybackGeneration) return;
+                        audioFailed = true;
+                        ChatStatus = "朗读不可用，继续文字回答";
+                        streamingPlayer?.StopAndClear();
+                    });
+                    audio.Completed += () => EnqueueMainThread(() =>
+                    {
+                        if (generation == ttsPlaybackGeneration) streamingPlayer?.EndStream();
+                    });
+                    streamingPlayer?.BeginStream(audio.OutputSampleRate, 1);
+                    var start = audio.StartAsync(token);
+                    if (await Task.WhenAny(start, Task.Delay(8000, token)) != start)
+                        throw new TimeoutException();
+                    await start;
+                }
+                catch (Exception) when (!token.IsCancellationRequested)
+                {
+                    audioFailed = true;
+                    ChatStatus = "朗读不可用，继续文字回答";
+                    streamingPlayer?.StopAndClear();
+                    if (audio != null) { _ = audio.CancelAsync(); audio.Dispose(); audio = null; }
+                    if (generation == ttsPlaybackGeneration) ttsService = null;
                 }
             }
-        }
-        catch (OperationCanceledException)
-        {
-            var partialText = assistantBuilder.ToString();
-            if (assistantRecord != null)
+            token.ThrowIfCancellationRequested();
+            await service.StreamChatAsync(conversation, delta =>
             {
-                CompleteAssistantMessage(assistantSession, assistantConversationGeneration, assistantRecord, partialText, "interrupted");
+                token.ThrowIfCancellationRequested();
+                if (generation != ttsPlaybackGeneration) return;
+                answer.Append(delta);
+                AppendAssistantDelta(session, conversationGeneration, record, delta);
+                if (audio != null && !audioFailed && readRepliesAloud)
+                {
+                    try { audio.EnqueueText(delta); }
+                    catch { audioFailed = true; }
+                }
+                EnqueueMainThread(() =>
+                {
+                    if (generation != ttsPlaybackGeneration) return;
+                    currentAssistantText += delta;
+                    onAssistantDelta?.Invoke(delta);
+                });
+            }, token, context);
+            token.ThrowIfCancellationRequested();
+            CompleteAssistantMessage(session, conversationGeneration, record, answer.ToString(), "completed");
+            if (!enablePersistentConversation && answer.Length > 0) AddHistory(userText, answer.ToString());
+            if (audio != null && !audioFailed && readRepliesAloud)
+            {
+                try
+                {
+                    audio.CompleteInput();
+                    var finish = audio.WaitForCompletionAsync();
+                    if (await Task.WhenAny(finish, Task.Delay(60000, token)) == finish) await finish;
+                    else { audioFailed = true; _ = audio.CancelAsync(); }
+                }
+                catch (Exception) when (!token.IsCancellationRequested) { audioFailed = true; }
             }
+            token.ThrowIfCancellationRequested();
+            ChatStatus = audioFailed ? "回复完成；朗读不可用" : "就绪";
+        }
+        catch (Exception) when (token.IsCancellationRequested || generation != ttsPlaybackGeneration)
+        {
+            if (record != null && record.status != "completed")
+                CompleteAssistantMessage(session, conversationGeneration, record, answer.ToString(), "interrupted");
         }
         catch (Exception ex)
         {
-            if (assistantRecord != null)
-            {
-                var status = deepSeekCompleted && assistantBuilder.Length > 0 ? "completed" : "error";
-                CompleteAssistantMessage(assistantSession, assistantConversationGeneration, assistantRecord, assistantBuilder.ToString(), status);
-            }
-
-            EnqueueMainThread(() => ReportError($"Assistant turn failed: {ex.Message}"));
-            EnqueueMainThread(() =>
-            {
-                if (playbackGeneration == ttsPlaybackGeneration)
-                {
-                    streamingPlayer.StopAndClear();
-                }
-            });
+            if (record != null) CompleteAssistantMessage(session, conversationGeneration, record, answer.ToString(), "error");
+            ChatStatus = ex is InvalidOperationException ? ex.Message : "模型连接失败或超时，请检查接口配置和网络。";
+            streamingPlayer?.StopAndClear();
         }
         finally
         {
-            if (activeTtsService != null && ReferenceEquals(ttsService, activeTtsService))
+            audio?.Dispose();
+            if (generation == ttsPlaybackGeneration)
             {
-                activeTtsService.Dispose();
-                ttsService = null;
+                if (ReferenceEquals(ttsService, audio)) ttsService = null;
+                IsGenerating = false;
+                turnCts = null;
             }
+            cancellation.Dispose();
         }
     }
 
     private async Task<string> ResolveDoubaoVoiceInstructionAsync(
-        DeepSeekService deepSeek,
+        ChatCompletionService deepSeek,
         string userText,
         CancellationToken cancellationToken)
     {
@@ -890,9 +952,9 @@ public class VoiceChatController : MonoBehaviour
         try
         {
             var prompt = BuildDoubaoVoiceInstructionUserPrompt(userText, fallback);
-            var messages = new List<DeepSeekService.ChatMessage>
+            var messages = new List<ChatCompletionService.ChatMessage>
             {
-                new DeepSeekService.ChatMessage("user", prompt)
+                new ChatCompletionService.ChatMessage("user", prompt)
             };
             var result = await deepSeek.CompleteChatAsync(
                 messages,
@@ -1400,7 +1462,7 @@ public class VoiceChatController : MonoBehaviour
                 continue;
             }
 
-            history.Add(new DeepSeekService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
+            history.Add(new ChatCompletionService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
         }
     }
 
@@ -1420,7 +1482,7 @@ public class VoiceChatController : MonoBehaviour
             return;
         }
 
-        history.Add(new DeepSeekService.ChatMessage("user", userText));
+        history.Add(new ChatCompletionService.ChatMessage("user", userText));
         UpdateConversationDisplay();
     }
 
@@ -1559,9 +1621,9 @@ public class VoiceChatController : MonoBehaviour
         activeConversationId = activeSession.id;
     }
 
-    private List<DeepSeekService.ChatMessage> BuildConversation(string userText)
+    private List<ChatCompletionService.ChatMessage> BuildConversation(string userText)
     {
-        var source = new List<DeepSeekService.ChatMessage>();
+        var source = new List<ChatCompletionService.ChatMessage>();
 
         if (enablePersistentConversation)
         {
@@ -1575,7 +1637,7 @@ public class VoiceChatController : MonoBehaviour
                         continue;
                     }
 
-                    source.Add(new DeepSeekService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
+                    source.Add(new ChatCompletionService.ChatMessage(message.role, GetDisplayMessageContent(message.role, message.content)));
                 }
             }
         }
@@ -1600,7 +1662,7 @@ public class VoiceChatController : MonoBehaviour
             return clipped;
         }
 
-        var conversation = new List<DeepSeekService.ChatMessage>(systemMessages.Count + clipped.Count);
+        var conversation = new List<ChatCompletionService.ChatMessage>(systemMessages.Count + clipped.Count);
         conversation.AddRange(systemMessages);
         conversation.AddRange(clipped);
         return conversation;
@@ -1635,14 +1697,14 @@ public class VoiceChatController : MonoBehaviour
         return context;
     }
 
-    private async Task<List<DeepSeekService.ChatMessage>> ResolveAgentToolCallsAsync(
-        DeepSeekService deepSeek,
-        List<DeepSeekService.ChatMessage> conversation,
+    private async Task<List<ChatCompletionService.ChatMessage>> ResolveAgentToolCallsAsync(
+        ChatCompletionService deepSeek,
+        List<ChatCompletionService.ChatMessage> conversation,
         string runtimeSystemContext,
         string userText,
         CancellationToken cancellationToken)
     {
-        if (!enableAgentTools || deepSeek == null || conversation == null)
+        if (!enableAgentTools || deepSeek == null || !deepSeek.SupportsTools || conversation == null)
         {
             currentAgentToolStatus = enableAgentTools ? string.Empty : "工具决策：已关闭。";
             return conversation;
@@ -1655,7 +1717,7 @@ public class VoiceChatController : MonoBehaviour
             return conversation;
         }
 
-        var toolConversation = new List<DeepSeekService.ChatMessage>(conversation);
+        var toolConversation = new List<ChatCompletionService.ChatMessage>(conversation);
         var rounds = Mathf.Clamp(maxAgentToolRounds, 0, 4);
         currentAgentToolStatus = "工具决策：等待模型判断。";
 
@@ -1680,13 +1742,13 @@ public class VoiceChatController : MonoBehaviour
                 }
 
                 currentAgentToolStatus = $"工具决策：第 {round + 1} 轮调用 {FormatToolCallNames(result.toolCalls)}。";
-                toolConversation.Add(DeepSeekService.ChatMessage.AssistantToolCalls(result.toolCalls, result.content));
+                toolConversation.Add(ChatCompletionService.ChatMessage.AssistantToolCalls(result.toolCalls, result.content));
 
                 foreach (var toolCall in result.toolCalls)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var toolResult = await ExecuteAgentToolCallAsync(toolCall, userText, cancellationToken);
-                    toolConversation.Add(DeepSeekService.ChatMessage.ToolResult(toolCall.id, toolResult));
+                    toolConversation.Add(ChatCompletionService.ChatMessage.ToolResult(toolCall.id, toolResult));
                 }
             }
         }
@@ -1770,7 +1832,7 @@ public class VoiceChatController : MonoBehaviour
     }
 
     private async Task<string> ExecuteAgentToolCallAsync(
-        DeepSeekService.ToolCall toolCall,
+        ChatCompletionService.ToolCall toolCall,
         string fallbackQuery,
         CancellationToken cancellationToken)
     {
@@ -2088,7 +2150,7 @@ public class VoiceChatController : MonoBehaviour
         }.ToString(Newtonsoft.Json.Formatting.None);
     }
 
-    private static string FormatToolCallNames(IReadOnlyList<DeepSeekService.ToolCall> toolCalls)
+    private static string FormatToolCallNames(IReadOnlyList<ChatCompletionService.ToolCall> toolCalls)
     {
         if (toolCalls == null || toolCalls.Count == 0)
         {
@@ -2161,7 +2223,7 @@ public class VoiceChatController : MonoBehaviour
 
     private void AddHistory(string userText, string assistantText)
     {
-        history.Add(new DeepSeekService.ChatMessage("assistant", assistantText));
+        history.Add(new ChatCompletionService.ChatMessage("assistant", assistantText));
 
         var maxMessages = deepSeekConfig != null ? deepSeekConfig.maxHistoryMessages : 12;
         var maxRuntimeMessages = Mathf.Max(maxMessages * 4, maxMessages);

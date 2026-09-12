@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
-public sealed class DeepSeekService
+public sealed class ChatCompletionService
 {
     public sealed class ToolCall
     {
@@ -75,11 +75,20 @@ public sealed class DeepSeekService
     }
 
     private static readonly HttpClient HttpClient = new HttpClient();
-    private readonly DeepSeekConfig config;
+    private readonly DeepSeekRuntimeSettings config;
+    private readonly ChatModelProfile profile;
+    public bool SupportsTools => profile.enableTools;
 
-    public DeepSeekService(DeepSeekConfig config)
+    public ChatCompletionService(ChatModelProfile profile, DeepSeekConfig config)
     {
-        this.config = config;
+        this.profile = profile.Copy();
+        this.config = config == null ? new DeepSeekRuntimeSettings() : JsonUtility.FromJson<DeepSeekRuntimeSettings>(JsonUtility.ToJson(config));
+    }
+
+    public ChatCompletionService(ChatModelProfile profile, string systemPrompt)
+    {
+        this.profile = profile.Copy();
+        config = new DeepSeekRuntimeSettings { systemPrompt = systemPrompt, logRequestPayloadToConsole = false };
     }
 
     public async Task StreamChatAsync(
@@ -90,10 +99,14 @@ public sealed class DeepSeekService
     {
         ValidateConfig();
 
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(120));
+        cancellationToken = timeout.Token;
+
         var requestBody = BuildRequestBody(conversation, additionalSystemPrompt, true, null, null);
         LogRequestPayload(requestBody);
-        var request = new HttpRequestMessage(HttpMethod.Post, config.chatCompletionsUrl);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.apiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, profile.Endpoint);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", profile.apiKey.Trim());
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         request.Content = new StringContent(requestBody.ToString(Newtonsoft.Json.Formatting.None), Encoding.UTF8, "application/json");
 
@@ -106,12 +119,20 @@ public sealed class DeepSeekService
                 using (var reader = new StreamReader(bodyStream, Encoding.UTF8))
                 {
                     var errorBody = await reader.ReadToEndAsync();
-                    throw new InvalidOperationException($"DeepSeek HTTP {(int)response.StatusCode}: {errorBody}");
+                    throw HttpError((int)response.StatusCode);
                 }
             }
 
+            using (cancellationToken.Register(() => bodyStream.Dispose()))
             using (var reader = new StreamReader(bodyStream, Encoding.UTF8))
             {
+                if (response.Content.Headers.ContentType?.MediaType == "application/json")
+                {
+                    var result = ParseCompletionResult(await reader.ReadToEndAsync());
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!string.IsNullOrEmpty(result.content)) onDelta?.Invoke(result.content);
+                    return;
+                }
                 while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
                 {
                     var line = await reader.ReadLineAsync();
@@ -126,6 +147,7 @@ public sealed class DeepSeekService
                         break;
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     var delta = ParseDelta(data);
                     if (!string.IsNullOrEmpty(delta))
                     {
@@ -147,8 +169,8 @@ public sealed class DeepSeekService
 
         var requestBody = BuildRequestBody(conversation, additionalSystemPrompt, false, tools, toolChoice);
         LogRequestPayload(requestBody);
-        var request = new HttpRequestMessage(HttpMethod.Post, config.chatCompletionsUrl);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.apiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Post, profile.Endpoint);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", profile.apiKey.Trim());
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Content = new StringContent(requestBody.ToString(Newtonsoft.Json.Formatting.None), Encoding.UTF8, "application/json");
 
@@ -157,7 +179,7 @@ public sealed class DeepSeekService
             var responseBody = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
-                throw new InvalidOperationException($"DeepSeek HTTP {(int)response.StatusCode}: {responseBody}");
+                throw HttpError((int)response.StatusCode);
             }
 
             return ParseCompletionResult(responseBody);
@@ -275,15 +297,18 @@ public sealed class DeepSeekService
 
         var body = new JObject
         {
-            ["model"] = config.model,
+            ["model"] = profile.model.Trim(),
             ["messages"] = messages,
-            ["stream"] = stream,
-            ["temperature"] = config.temperature,
-            ["top_p"] = config.topP,
-            ["max_tokens"] = config.maxTokens
+            ["stream"] = stream
         };
 
-        if (tools != null && tools.Count > 0)
+        if (profile.sendSampling)
+        {
+            body["temperature"] = profile.temperature;
+            body["top_p"] = profile.topP;
+        }
+        if (profile.sendTokenLimit) body[profile.useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens"] = profile.maxTokens;
+        if (profile.enableTools && tools != null && tools.Count > 0)
         {
             body["tools"] = tools;
             if (!string.IsNullOrWhiteSpace(toolChoice))
@@ -292,7 +317,7 @@ public sealed class DeepSeekService
             }
         }
 
-        if (config.disableThinking)
+        if (profile.preset == "DeepSeek" && profile.disableThinking)
         {
             body["thinking"] = new JObject { ["type"] = "disabled" };
         }
@@ -302,30 +327,21 @@ public sealed class DeepSeekService
 
     private void LogRequestPayload(JObject requestBody)
     {
-        if (config == null || !config.logRequestPayloadToConsole || requestBody == null)
-        {
-            return;
-        }
+        // Request bodies contain conversation and local knowledge. Keep them out of logs.
+    }
 
-        var payload = requestBody.ToString(Newtonsoft.Json.Formatting.None);
-        var chunkSize = Math.Max(200, config.requestPayloadLogChunkCharacters);
-        var chunkCount = (payload.Length + chunkSize - 1) / chunkSize;
-
-        Debug.Log($"DeepSeek HTTP request payload JSON BEGIN length={payload.Length}, chunks={chunkCount}, url={config.chatCompletionsUrl}");
-
-        for (var offset = 0; offset < payload.Length; offset += chunkSize)
-        {
-            var chunkIndex = offset / chunkSize + 1;
-            var count = Math.Min(chunkSize, payload.Length - offset);
-            Debug.Log($"DeepSeek HTTP request payload JSON [{chunkIndex}/{chunkCount}] {payload.Substring(offset, count)}");
-        }
-
-        Debug.Log("DeepSeek HTTP request payload JSON END");
+    private static Exception HttpError(int status)
+    {
+        var hint = status == 401 || status == 403 ? "密钥无效或没有访问权限"
+            : status == 404 ? "接口地址或模型不存在" : status == 429 ? "请求限流或额度不足"
+            : status == 400 ? "模型或请求参数不被接口支持" : "服务请求失败";
+        return new InvalidOperationException($"模型接口 HTTP {status}：{hint}。");
     }
 
     private static string ParseDelta(string data)
     {
         var root = JObject.Parse(data);
+        if (root["error"] != null) throw new InvalidOperationException("模型接口返回错误，请检查配置及服务状态。");
         var choices = root["choices"] as JArray;
 
         if (choices == null || choices.Count == 0)
@@ -345,6 +361,7 @@ public sealed class DeepSeekService
         }
 
         var root = JObject.Parse(body);
+        if (root["error"] != null) throw new InvalidOperationException("模型接口返回错误，请检查配置及服务状态。");
         var choices = root["choices"] as JArray;
         if (choices == null || choices.Count == 0)
         {
@@ -387,14 +404,6 @@ public sealed class DeepSeekService
 
     private void ValidateConfig()
     {
-        if (config == null)
-        {
-            throw new InvalidOperationException("DeepSeekConfig is not assigned.");
-        }
-
-        if (string.IsNullOrWhiteSpace(config.apiKey))
-        {
-            throw new InvalidOperationException("DeepSeekConfig apiKey is empty.");
-        }
+        profile.Validate();
     }
 }
