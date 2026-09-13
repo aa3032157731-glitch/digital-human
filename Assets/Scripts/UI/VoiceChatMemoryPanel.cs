@@ -315,6 +315,8 @@ public sealed class VoiceChatMemoryPanel : MonoBehaviour
         WireToggleButton();
         EnsureConversationSelector();
         EnsureConversationScrollView();
+        if (controller != null && conversationText != null && GetComponent<TextChatComposer>() == null)
+            gameObject.AddComponent<TextChatComposer>().Build(this);
 
         if (!hasAppliedInitialExpandedState)
         {

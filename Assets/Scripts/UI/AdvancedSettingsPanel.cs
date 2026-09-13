@@ -22,6 +22,7 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
     private readonly Dictionary<string, GameObject> pagesByName = new Dictionary<string, GameObject>();
     private RuntimeVoiceChatSettings workingSettings;
     private bool initialized;
+    private ModelProfilesPanel modelProfilesPanel;
 
     private void Awake()
     {
@@ -78,7 +79,10 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
             return;
         }
 
+        if (modelProfilesPanel != null && !modelProfilesPanel.Pull()) return;
         ApplyControlsToSettings();
+        try { workingSettings.modelProfiles.Find(p => p.id == workingSettings.activeModelProfileId).Validate(); }
+        catch (Exception ex) { SetStatus(ex.Message); return; }
         controller.ApplyRuntimeSettings(workingSettings);
 
         if (VoiceChatRuntimeConfigStore.SaveSettings(workingSettings))
@@ -175,6 +179,22 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
             modelSwitcher = FindObjectOfType<CharacterModelSwitcher>(true);
         }
 
+        var modelPage = FindGameObject("Page_DeepSeek");
+        if (modelPage != null)
+        {
+            modelProfilesPanel = modelPage.AddComponent<ModelProfilesPanel>();
+            modelProfilesPanel.Build(SaveAndApply);
+        }
+        var modelTab = FindComponent<Button>("Tab_DeepSeek");
+        if (modelTab != null) modelTab.GetComponentInChildren<Text>(true).text = "大模型";
+        var oldKey = FindGameObject("Row_DeepSeek_ApiKey");
+        if (oldKey != null) oldKey.SetActive(false);
+        var voiceDirector = FindGameObject("Row_DoubaoTTS_EnableDeepSeekVoiceInstruction");
+        if (voiceDirector != null)
+        {
+            var label = voiceDirector.GetComponentInChildren<Text>(true);
+            if (label != null) label.text = "使用当前大模型选择语气";
+        }
         BuildBindings();
         CachePages();
         WireButtons();
@@ -310,7 +330,6 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
     {
         bindings.Clear();
 
-        BindInput("DeepSeek_ApiKey", s => s.deepSeek.apiKey, (s, v) => s.deepSeek.apiKey = v);
         BindInput("BaiduSearch_ApiKey", s => s.baiduSearch.apiKey, (s, v) => s.baiduSearch.apiKey = v);
         BindInput("XFASR_AppId", s => s.xunfeiAsr.appId, (s, v) => s.xunfeiAsr.appId = v);
         BindInput("XFASR_ApiKey", s => s.xunfeiAsr.apiKey, (s, v) => s.xunfeiAsr.apiKey = v);
@@ -393,16 +412,6 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
         BindIntInput("XFASR_FrameIntervalMs", s => s.xunfeiAsr.frameIntervalMs, (s, v) => s.xunfeiAsr.frameIntervalMs = v);
         BindIntInput("XFASR_MaxRecordSeconds", s => s.xunfeiAsr.maxRecordSeconds, (s, v) => s.xunfeiAsr.maxRecordSeconds = v);
 
-        BindInput("DeepSeek_ChatCompletionsUrl", s => s.deepSeek.chatCompletionsUrl, (s, v) => s.deepSeek.chatCompletionsUrl = v);
-        BindInput("DeepSeek_Model", s => s.deepSeek.model, (s, v) => s.deepSeek.model = v);
-        BindInput("DeepSeek_SystemPrompt", s => s.deepSeek.systemPrompt, (s, v) => s.deepSeek.systemPrompt = v);
-        BindFloatInput("DeepSeek_Temperature", s => s.deepSeek.temperature, (s, v) => s.deepSeek.temperature = v);
-        BindFloatInput("DeepSeek_TopP", s => s.deepSeek.topP, (s, v) => s.deepSeek.topP = v);
-        BindIntInput("DeepSeek_MaxTokens", s => s.deepSeek.maxTokens, (s, v) => s.deepSeek.maxTokens = v);
-        BindIntInput("DeepSeek_MaxHistoryMessages", s => s.deepSeek.maxHistoryMessages, (s, v) => s.deepSeek.maxHistoryMessages = v);
-        BindToggle("DeepSeek_DisableThinking", s => s.deepSeek.disableThinking, (s, v) => s.deepSeek.disableThinking = v);
-        BindToggle("DeepSeek_LogRequestPayloadToConsole", s => s.deepSeek.logRequestPayloadToConsole, (s, v) => s.deepSeek.logRequestPayloadToConsole = v);
-        BindIntInput("DeepSeek_RequestPayloadLogChunkCharacters", s => s.deepSeek.requestPayloadLogChunkCharacters, (s, v) => s.deepSeek.requestPayloadLogChunkCharacters = v);
 
         BindInput("BaiduSearch_Endpoint", s => s.baiduSearch.endpoint, (s, v) => s.baiduSearch.endpoint = v);
         BindInput("BaiduSearch_AuthorizationHeaderName", s => s.baiduSearch.authorizationHeaderName, (s, v) => s.baiduSearch.authorizationHeaderName = v);
@@ -506,6 +515,7 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
         {
             binding.Push(workingSettings);
         }
+        modelProfilesPanel?.Load(workingSettings);
     }
 
     private void ApplyControlsToSettings()
@@ -516,6 +526,7 @@ public sealed class AdvancedSettingsPanel : MonoBehaviour
         }
 
         workingSettings.EnsureDefaults();
+        modelProfilesPanel?.Pull();
         foreach (var binding in bindings)
         {
             binding.Pull(workingSettings);
