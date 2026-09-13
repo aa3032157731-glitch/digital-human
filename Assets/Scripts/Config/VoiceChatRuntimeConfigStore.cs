@@ -261,6 +261,10 @@ public sealed class AgentToolRuntimeSettings
 
 public static class VoiceChatRuntimeConfigStore
 {
+#if UNITY_EDITOR
+    // Editor integration tests use an isolated store, never the user's saved credentials.
+    internal static string EditorSettingsPathOverride;
+#endif
     private const string RuntimeConfigFolder = "RuntimeConfig";
     private const string RuntimeConfigFileName = "voice-chat-settings.json";
 
@@ -268,6 +272,9 @@ public static class VoiceChatRuntimeConfigStore
     {
         get
         {
+#if UNITY_EDITOR
+            if (!string.IsNullOrEmpty(EditorSettingsPathOverride)) return EditorSettingsPathOverride;
+#endif
             return Path.Combine(Application.persistentDataPath, RuntimeConfigFolder, RuntimeConfigFileName);
         }
     }

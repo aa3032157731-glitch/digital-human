@@ -133,9 +133,10 @@ public sealed class ChatCompletionService
                     if (!string.IsNullOrEmpty(result.content)) onDelta?.Invoke(result.content);
                     return;
                 }
-                while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+                while (!cancellationToken.IsCancellationRequested)
                 {
                     var line = await reader.ReadLineAsync();
+                    if (line == null) break;
                     if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.Ordinal))
                     {
                         continue;

@@ -28,3 +28,6 @@ Assets 的 `.meta` 必须与资源一起管理。二进制贴图、模型、音�
 - 主场景中面部识别对象已删除；旧聊天表情附加内容过滤和文本语气提示构造通过自动检查。
 - 主场景仍报告 3 个 Missing Script，属于已有资源问题。
 - 真实麦克风、外部聊天与语音服务、口型及画面效果仍需在 Unity 播放模式下手动验收。
+
+
+新增功能位于 `feature/text-chat-model-profiles` 分支，文字聊天和多套接口配置见 [CHAT_MODELS.md](CHAT_MODELS.md)。

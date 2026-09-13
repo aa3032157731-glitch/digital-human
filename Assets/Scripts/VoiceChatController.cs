@@ -913,6 +913,12 @@ public class VoiceChatController : MonoBehaviour
             if (generation == ttsPlaybackGeneration)
             {
                 if (ReferenceEquals(ttsService, audio)) ttsService = null;
+                if (audioFailed)
+                {
+                    streamingPlayer?.StopAndClear();
+                    isSpeaking = false;
+                    SetTalkAnimation(false);
+                }
                 IsGenerating = false;
                 turnCts = null;
             }
