@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "title": "第四章程序分析 FactoryLab 教学知识包",
+  "language": "zh-CN",
+  "sourcePdf": "基础工业工程_第四章_第50-101页.pdf",
+  "sourceSha256": "281DE15B242076515ED658665CDB6FCEF3BE439D8057F8037B3080F0FB14EDE0",
+  "documents": [
+    { "file": "01-program-analysis-overview.txt", "title": "程序分析概述", "pages": "41-45", "alwaysInclude": true },
+    { "file": "02-process-symbols.txt", "title": "程序分析五类活动和符号", "pages": "42,55-56", "alwaysInclude": true },
+    { "file": "03-operation-process-chart.txt", "title": "工艺程序分析与工艺程序图", "pages": "45-54", "alwaysInclude": true },
+    { "file": "04-flow-process-chart.txt", "title": "流程程序分析与流程程序图", "pages": "55-72", "alwaysInclude": true },
+    { "file": "05-layout-route-and-improvement.txt", "title": "布置和经路分析、5W1H与ECRS", "pages": "43-44,73-88", "alwaysInclude": true },
+    { "file": "06-scene-qa.txt", "title": "台灯装配场景问答参考", "pages": "P1案例", "alwaysInclude": false }
+  ]
+}

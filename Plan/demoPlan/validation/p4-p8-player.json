@@ -1,0 +1,57 @@
+{
+  "status": "PASS",
+  "checks": [
+    "original 20-piece order saved",
+    "fixed area cannot move",
+    "swaps recalculate legal route",
+    "improved order saved",
+    "same parameter comparison",
+    "baseline snapshot immutable after swaps",
+    "different order quantities cannot compare",
+    "grounded local question: 装配和检验在程序分析里有什么区别？",
+    "grounded local question: 产品在检验台前停了45秒，这是等待还是储存？",
+    "grounded local question: 这段搬运为什么这么远？",
+    "grounded local question: 产品搬运距离和搬运车空驶距离有什么不同？",
+    "grounded local question: 把检验台移近装配台就一定能提高产量吗？",
+    "grounded local question: 为什么流程程序图要记录等待和储存？",
+    "grounded local question: 这个改善属于ECRS中的哪一项？",
+    "grounded local question: 我可以取消检验步骤吗？",
+    "grounded local question: 为什么搬运距离下降了，订单完成时间下降得不多？",
+    "grounded local question: 这次仿真可以证明真实工厂一定会这样吗？",
+    "question pauses and captures experiment id",
+    "reset replaces teacher snapshot",
+    "independent simulation time scale",
+    "lesson step 1",
+    "lesson step 2",
+    "lesson step 3",
+    "lesson step 4",
+    "lesson step 5",
+    "lesson step 6",
+    "objective score bounded at 40; manual 60 pending",
+    "report escapes student text",
+    "report includes actual comparison and product ledger",
+    "existing digital human installed"
+  ],
+  "renderMode": "offscreen GPU with readback barrier; excludes desktop presentation",
+  "fps": 353.67265552442558,
+  "teacherFps": 173.20374960909791,
+  "width": 1920,
+  "height": 1080,
+  "report": "C:/Users/qqcom/AppData/LocalLow/Camelminger/customDigitalman\\FactoryLab\\Acceptance\\Reports\\FactoryLab-20260922-162357-529.html",
+  "animators": [
+    {
+      "name": "Camelmingerup",
+      "enabled": true,
+      "controller": "Camelminger_Animator",
+      "avatar": "CamelmingerupAvatar",
+      "state": 403266816
+    },
+    {
+      "name": "female4_0",
+      "enabled": true,
+      "controller": "Camelminger_Animator",
+      "avatar": "female4_0Avatar",
+      "state": 0
+    }
+  ]
+}

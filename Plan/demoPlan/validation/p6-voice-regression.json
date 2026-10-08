@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "checks": [
+    "mouth animation samples and interpolation",
+    "both copied model mappings and jaw motion",
+    "speech native library loading",
+    "ordered speech queue and cancellation",
+    "PCM packet buffer and ten-minute ring playback",
+    "TTS cancellation late callbacks",
+    "synthetic TTS success/error/timeout",
+    "teacher context replaces unrelated knowledge"
+  ],
+  "liveNetwork": false
+}

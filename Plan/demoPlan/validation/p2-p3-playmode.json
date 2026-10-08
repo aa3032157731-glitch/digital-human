@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "exportPath": "C:/Users/qqcom/AppData/LocalLow/Camelminger/customDigitalman\\FactoryLab\\Runs\\20260921-234819-035-f31d67",
+  "checks": [
+    "UI single-piece button",
+    "live clock",
+    "pause across frames",
+    "global timescale preserved",
+    "single-piece result",
+    "camera modes",
+    "20-piece reset",
+    "six station raycasts and highlights",
+    "20-piece completion",
+    "UI export button",
+    "JSON result and ledger",
+    "CSV rows"
+  ]
+}

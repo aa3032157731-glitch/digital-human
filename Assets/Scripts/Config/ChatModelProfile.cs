@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using Newtonsoft.Json;
 using UnityEngine;
 
 [Serializable]
 public sealed class ChatModelProfile
 {
+    public string serviceAccountId;
     public string id = Guid.NewGuid().ToString("N");
     public string displayName = "兼容接口";
     public string preset = "Compatible";
@@ -20,7 +22,7 @@ public sealed class ChatModelProfile
     public bool useMaxCompletionTokens;
     public bool disableThinking;
 
-    public ChatModelProfile Copy() => JsonUtility.FromJson<ChatModelProfile>(JsonUtility.ToJson(this));
+    public ChatModelProfile Copy() => JsonConvert.DeserializeObject<ChatModelProfile>(JsonConvert.SerializeObject(this));
 
     public string Endpoint
     {

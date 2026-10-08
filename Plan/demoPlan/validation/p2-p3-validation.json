@@ -1,0 +1,50 @@
+{
+  "status": "PASS",
+  "checks": [
+    "baseline: single piece analytic time and distance pass",
+    "baseline: 20 products, ledger, capacity and playback reproducibility pass",
+    "baseline: capacity-one backpressure and conservation pass",
+    "reference-improved: single piece analytic time and distance pass",
+    "reference-improved: 20 products, ledger, capacity and playback reproducibility pass",
+    "reference-improved: capacity-one backpressure and conservation pass",
+    "24 legal workstation permutations complete without deadlock",
+    "zero service and handling times terminate correctly",
+    "invalid speed rejected"
+  ],
+  "runs": [
+    {
+      "layout": "baseline",
+      "quantity": 20,
+      "Time": 1771.0,
+      "LoadedDistance": 680.0,
+      "EmptyDistance": 618.0,
+      "totalWaitSeconds": 4391.0,
+      "queues": [
+        0,
+        2,
+        1,
+        1,
+        1,
+        0
+      ],
+      "events": 452
+    },
+    {
+      "layout": "reference-improved",
+      "quantity": 20,
+      "Time": 1454.0,
+      "LoadedDistance": 360.0,
+      "EmptyDistance": 588.0,
+      "totalWaitSeconds": 5649.0,
+      "queues": [
+        0,
+        4,
+        1,
+        1,
+        1,
+        0
+      ],
+      "events": 526
+    }
+  ]
+}

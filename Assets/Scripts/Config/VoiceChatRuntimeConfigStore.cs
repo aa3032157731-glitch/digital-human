@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using Newtonsoft.Json;
 using UnityEngine;
 
 [Serializable]
 public sealed class RuntimeVoiceChatSettings
 {
-    public int schemaVersion = 4;
+    public int schemaVersion = 5;
+    public List<ServiceAccount> serviceAccounts = new List<ServiceAccount>();
     public List<ChatModelProfile> modelProfiles = new List<ChatModelProfile>();
     public string activeModelProfileId;
     public bool readRepliesAloud = true;
@@ -17,6 +19,10 @@ public sealed class RuntimeVoiceChatSettings
     public XFTTSRuntimeSettings xunfeiSuperSmartTts = new XFTTSRuntimeSettings();
     public XFOnlineTTSRuntimeSettings xunfeiOnlineTts = new XFOnlineTTSRuntimeSettings();
     public DoubaoTTSRuntimeSettings doubaoTts = new DoubaoTTSRuntimeSettings();
+    public AzureTTSSettings azureTts = new AzureTTSSettings();
+    public PcmPlaybackSettings playback = new PcmPlaybackSettings();
+    public MouthTuning testMouth = new MouthTuning();
+    public MouthTuning girlMouth = new MouthTuning();
     public VoiceFeatureRuntimeSettings features = new VoiceFeatureRuntimeSettings();
     public MemoryRuntimeSettings memory = new MemoryRuntimeSettings();
     public KnowledgeRuntimeSettings knowledge = new KnowledgeRuntimeSettings();
@@ -32,6 +38,11 @@ public sealed class RuntimeVoiceChatSettings
         if (xunfeiOnlineTts == null) xunfeiOnlineTts = new XFOnlineTTSRuntimeSettings();
         if (doubaoTts == null) doubaoTts = new DoubaoTTSRuntimeSettings();
         doubaoTts.EnsureDefaults();
+        if (azureTts == null) azureTts = new AzureTTSSettings();
+        if (playback == null) playback = new PcmPlaybackSettings();
+        if (testMouth == null) testMouth = new MouthTuning();
+        if (girlMouth == null) girlMouth = new MouthTuning();
+        testMouth.Sanitize(); girlMouth.Sanitize();
         if (features == null) features = new VoiceFeatureRuntimeSettings();
         if (memory == null) memory = new MemoryRuntimeSettings();
         if (knowledge == null) knowledge = new KnowledgeRuntimeSettings();
@@ -55,7 +66,8 @@ public sealed class RuntimeVoiceChatSettings
             }
         }
         if (!modelProfiles.Exists(p => p.id == activeModelProfileId)) activeModelProfileId = modelProfiles[0].id;
-        schemaVersion = 4;
+        ServiceAccounts.Migrate(this);
+        schemaVersion = 6;
     }
 }
 
@@ -287,6 +299,15 @@ public static class VoiceChatRuntimeConfigStore
             return loaded;
         }
 
+        // A malformed or unreadable existing file must never be replaced by the
+        // controller's current inspector values. That could overwrite credentials
+        // with empty strings during startup or when the user clicks Reload.
+        if (File.Exists(SettingsFilePath))
+        {
+            Debug.LogWarning("Runtime voice chat settings could not be loaded; keeping the existing file intact.");
+            return CaptureFrom(controller);
+        }
+
         var settings = CaptureFrom(controller);
         SaveSettings(settings);
         return settings;
@@ -308,7 +329,7 @@ public static class VoiceChatRuntimeConfigStore
                 return null;
             }
 
-            var settings = JsonUtility.FromJson<RuntimeVoiceChatSettings>(json);
+            var settings = JsonConvert.DeserializeObject<RuntimeVoiceChatSettings>(json);
             settings?.EnsureDefaults();
             return settings;
         }
@@ -337,7 +358,15 @@ public static class VoiceChatRuntimeConfigStore
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(path, JsonUtility.ToJson(settings, true));
+            if (File.Exists(path))
+            {
+                var old = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(path));
+                if ((int?)old["schemaVersion"] < 6 && !File.Exists(path + ".v5.bak")) File.Copy(path, path + ".v5.bak");
+            }
+            var temporary = path + ".tmp";
+            File.WriteAllText(temporary, JsonConvert.SerializeObject(settings, Formatting.Indented));
+            if (File.Exists(path)) File.Replace(temporary, path, null);
+            else File.Move(temporary, path);
             return true;
         }
         catch (Exception ex)
@@ -369,10 +398,10 @@ public static class VoiceChatRuntimeConfigStore
     public static RuntimeVoiceChatSettings CaptureFrom(VoiceChatController controller)
     {
         var settings = new RuntimeVoiceChatSettings();
-        settings.EnsureDefaults();
 
         if (controller == null)
         {
+            settings.EnsureDefaults();
             return settings;
         }
 
@@ -382,16 +411,31 @@ public static class VoiceChatRuntimeConfigStore
             foreach (var profile in controller.modelProfiles) settings.modelProfiles.Add(profile.Copy());
         settings.activeModelProfileId = controller.activeModelProfileId;
         settings.readRepliesAloud = controller.readRepliesAloud;
-        settings.EnsureDefaults();
         CaptureBaiduSearch(controller.baiduSearchConfig, settings.baiduSearch);
         CaptureAsr(controller.asrConfig, settings.xunfeiAsr);
         CaptureSuperSmartTts(controller.ttsConfig, settings.xunfeiSuperSmartTts);
         CaptureOnlineTts(controller.onlineTtsConfig, settings.xunfeiOnlineTts);
         CaptureDoubaoTts(controller.doubaoTtsConfig, settings.doubaoTts);
+        if (controller.azureTtsConfig != null) settings.azureTts = controller.azureTtsConfig.settings.Copy();
+        settings.testMouth = controller.testMouth.Copy();
+        settings.girlMouth = controller.girlMouth.Copy();
+        if (controller.streamingPlayer != null)
+        {
+            settings.playback.startBufferSeconds = controller.streamingPlayer.startBufferSeconds;
+            settings.playback.resumeBufferSeconds = controller.streamingPlayer.resumeBufferSeconds;
+            settings.playback.maxQueuedSeconds = controller.streamingPlayer.maxQueuedSeconds;
+            settings.playback.logDiagnostics = controller.streamingPlayer.logDiagnostics;
+        }
         CaptureFeatures(controller, settings.features);
         CaptureMemory(controller, settings.memory);
         CaptureKnowledge(controller, settings.knowledge);
         CaptureAgentTools(controller, settings.agentTools);
+        if (controller.serviceAccounts != null && controller.serviceAccounts.Count > 0)
+        {
+            settings.serviceAccounts = controller.serviceAccounts.ConvertAll(a => a.Copy());
+            settings.schemaVersion = 6;
+        }
+        settings.EnsureDefaults();
         return settings;
     }
 
@@ -419,6 +463,12 @@ public static class VoiceChatRuntimeConfigStore
         controller.ttsConfig = EnsureRuntimeCopy(controller.ttsConfig);
         controller.onlineTtsConfig = EnsureRuntimeCopy(controller.onlineTtsConfig);
         controller.doubaoTtsConfig = EnsureRuntimeCopy(controller.doubaoTtsConfig);
+        if (controller.azureTtsConfig == null)
+        {
+            controller.azureTtsConfig = ScriptableObject.CreateInstance<AzureTTSConfig>();
+            controller.azureTtsConfig.hideFlags = HideFlags.DontSave;
+        }
+        else controller.azureTtsConfig = EnsureRuntimeCopy(controller.azureTtsConfig);
     }
 
     public static void ApplyTo(VoiceChatController controller, RuntimeVoiceChatSettings settings)
@@ -429,6 +479,8 @@ public static class VoiceChatRuntimeConfigStore
         }
 
         settings.EnsureDefaults();
+        ServiceAccounts.Resolve(settings);
+        controller.serviceAccounts = settings.serviceAccounts.ConvertAll(a => a.Copy());
         EnsureRuntimeConfigInstances(controller);
         ApplyDeepSeek(controller.deepSeekConfig, settings.deepSeek);
         controller.modelProfiles = settings.modelProfiles.ConvertAll(p => p.Copy());
@@ -439,6 +491,11 @@ public static class VoiceChatRuntimeConfigStore
         ApplySuperSmartTts(controller.ttsConfig, settings.xunfeiSuperSmartTts);
         ApplyOnlineTts(controller.onlineTtsConfig, settings.xunfeiOnlineTts);
         ApplyDoubaoTts(controller.doubaoTtsConfig, settings.doubaoTts);
+        controller.azureTtsConfig.settings = settings.azureTts.Copy();
+        controller.testMouth = settings.testMouth.Copy();
+        controller.girlMouth = settings.girlMouth.Copy();
+        controller.ApplyMouthTuning();
+        settings.playback.Apply(controller.streamingPlayer);
         ApplyFeatures(controller, settings.features);
         ApplyMemory(controller, settings.memory);
         ApplyKnowledge(controller, settings.knowledge);

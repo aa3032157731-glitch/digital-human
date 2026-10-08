@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "caseId": "lamp-assembly-process-analysis-v1",
+  "displayName": "台灯装配车间流程分析与布局改善",
+  "status": "teaching-assumption",
+  "units": { "distance": "m", "time": "s", "speed": "m/s", "quantity": "piece" },
+  "researchObject": {
+    "type": "material-product",
+    "id": "LAMP-01",
+    "description": "一件台灯成品及其配套物料",
+    "startStationId": "material-storage",
+    "endStationId": "finished-goods-storage"
+  },
+  "order": { "productId": "desk-lamp", "quantity": 20, "batchId": "ORDER-001" },
+  "constraints": {
+    "keepOperationOrder": true,
+    "inspectionRequired": true,
+    "fixedOperatorCount": 4,
+    "fixedCarrierCount": 1,
+    "fixedProductType": true,
+    "allowOnlyLegalStationSwap": true
+  },
+  "activityTypes": [
+    { "id": "operation", "symbol": "○", "name": "加工", "definition": "使物料、零件或半成品发生承受物理、化学、形态或功能变化" },
+    { "id": "inspection", "symbol": "□", "name": "检查", "definition": "检查物料、零件或成品的特性、数量或是否合格" },
+    { "id": "transport", "symbol": "→", "name": "搬运", "definition": "人员、物料或设备从一个物理位置移动到另一个位置" },
+    { "id": "delay", "symbol": "D", "name": "等待", "definition": "生产过程中不必要的时间耽搁或暂时停留" },
+    { "id": "storage", "symbol": "▽", "name": "储存", "definition": "为了控制目的而有意保管物料或成品" }
+  ],
+  "stations": [
+    { "id": "material-storage", "name": "供料区", "kind": "storage", "fixed": true, "cycleTime": 0, "bufferCapacity": 20 },
+    { "id": "assembly", "name": "装配台", "kind": "operation", "fixed": false, "cycleTime": 30, "bufferCapacity": 4, "outputCapacity": 1, "operatorId": "operator-assembly" },
+    { "id": "fastening", "name": "紧固台", "kind": "operation", "fixed": false, "cycleTime": 20, "bufferCapacity": 4, "outputCapacity": 1, "operatorId": "operator-fastening" },
+    { "id": "inspection", "name": "检验台", "kind": "inspection", "fixed": false, "cycleTime": 45, "bufferCapacity": 4, "outputCapacity": 1, "operatorId": "operator-inspection" },
+    { "id": "packaging", "name": "包装台", "kind": "operation", "fixed": false, "cycleTime": 25, "bufferCapacity": 4, "outputCapacity": 1, "operatorId": "operator-packaging" },
+    { "id": "finished-goods-storage", "name": "成品区", "kind": "storage", "fixed": true, "cycleTime": 0, "bufferCapacity": 20 }
+  ],
+  "route": [
+    { "sequence": 1, "from": "material-storage", "to": "assembly", "activity": "transport" },
+    { "sequence": 2, "station": "assembly", "activity": "operation", "description": "底座、灯杆和灯头模块装配" },
+    { "sequence": 3, "from": "assembly", "to": "fastening", "activity": "transport" },
+    { "sequence": 4, "station": "fastening", "activity": "operation", "description": "螺钉紧固" },
+    { "sequence": 5, "from": "fastening", "to": "inspection", "activity": "transport" },
+    { "sequence": 6, "station": "inspection", "activity": "inspection", "description": "外观、紧固和亮灯检查" },
+    { "sequence": 7, "from": "inspection", "to": "packaging", "activity": "transport" },
+    { "sequence": 8, "station": "packaging", "activity": "operation", "description": "装箱与封装" },
+    { "sequence": 9, "from": "packaging", "to": "finished-goods-storage", "activity": "transport" },
+    { "sequence": 10, "station": "finished-goods-storage", "activity": "storage", "description": "成品入库" }
+  ],
+  "carrier": { "id": "carrier-01", "name": "搬运车", "speed": 1.0, "loadSeconds": 2, "unloadSeconds": 2, "capacity": 1, "dispatch": "downstream-first-then-request-time" },
+  "bufferRules": { "inputCapacity": 4, "outputCapacity": 1, "queuePolicy": "FIFO" },
+  "simulation": { "clock": "independent", "randomness": "none", "playbackSpeeds": [1, 5, 10] },
+  "baselineMetrics": { "singleProductLoadedDistanceM": 34, "singleProductOperationSeconds": 120, "singleProductHandlingSeconds": 20, "singleProductNoQueueLowerBoundSeconds": 174 },
+  "source": { "bookTitle": "基础工业工程（第2版）", "chapter": "第四章 程序分析", "sourcePages": "41-88", "sourceFile": "基础工业工程_第四章_第50-101页.pdf" }
+}

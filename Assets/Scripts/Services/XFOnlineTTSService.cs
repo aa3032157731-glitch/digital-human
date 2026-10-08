@@ -20,7 +20,8 @@ public sealed class XFOnlineTTSService : ITTSService
     private readonly TaskCompletionSource<bool> completionSource = new TaskCompletionSource<bool>();
     private CancellationTokenSource internalCts;
     private ClientWebSocket activeWebSocket;
-    private bool inputCompleted;
+    private volatile bool inputCompleted;
+    private int terminalState;
 
     public XFOnlineTTSService(XFOnlineTTSConfig config)
     {
@@ -37,7 +38,8 @@ public sealed class XFOnlineTTSService : ITTSService
         }
 
         internalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _ = Task.Run(() => WorkerLoopAsync(internalCts.Token));
+        var token = internalCts.Token;
+        _ = Task.Run(() => WorkerLoopAsync(token));
         return Task.CompletedTask;
     }
 
@@ -61,26 +63,18 @@ public sealed class XFOnlineTTSService : ITTSService
         return completionSource.Task;
     }
 
-    public async Task CancelAsync()
+    public Task CancelAsync()
     {
-        try
-        {
-            internalCts?.Cancel();
-
-            if (activeWebSocket != null && activeWebSocket.State == WebSocketState.Open)
-            {
-                await activeWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "cancel", CancellationToken.None);
-            }
-        }
-        catch
-        {
-            activeWebSocket?.Abort();
-        }
+        CompleteCancelled();
+        try { internalCts?.Cancel(); activeWebSocket?.Abort(); } catch (ObjectDisposedException) { }
+        CompleteCancelled();
+        return Task.CompletedTask;
     }
 
     public void Dispose()
     {
-        internalCts?.Cancel();
+        CompleteCancelled();
+        try { internalCts?.Cancel(); } catch (ObjectDisposedException) { }
         activeWebSocket?.Dispose();
         internalCts?.Dispose();
     }
@@ -117,21 +111,22 @@ public sealed class XFOnlineTTSService : ITTSService
                 await Task.Delay(Math.Max(5, config.textPollIntervalMs), cancellationToken);
             }
 
-            completionSource.TrySetResult(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            CompleteSuccessfully();
         }
         catch (OperationCanceledException)
         {
-            completionSource.TrySetCanceled();
+            CompleteCancelled();
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteCancelled();
         }
         catch (Exception ex)
         {
-            Error?.Invoke($"XF online TTS failed: {ex.Message}");
-            completionSource.TrySetException(ex);
+            CompleteWithError($"XF online TTS failed: {ex.Message}", ex);
         }
-        finally
-        {
-            Completed?.Invoke();
-        }
+
     }
 
     private async Task SynthesizeOnceAsync(string text, CancellationToken cancellationToken)
@@ -154,7 +149,7 @@ public sealed class XFOnlineTTSService : ITTSService
                 var message = await ReceiveTextAsync(webSocket, cancellationToken);
                 if (string.IsNullOrEmpty(message))
                 {
-                    break;
+                    throw new IOException("TTS connection closed before the final audio frame.");
                 }
 
                 if (HandleResponse(message))
@@ -216,8 +211,7 @@ public sealed class XFOnlineTTSService : ITTSService
         if (code != 0)
         {
             var message = root["message"]?.ToString() ?? "unknown error";
-            Error?.Invoke($"XF online TTS error {code}: {message}");
-            return true;
+            throw new InvalidOperationException($"XF online TTS error {code}: {message}");
         }
 
         var audioBase64 = root["data"]?["audio"]?.ToString();
@@ -281,6 +275,23 @@ public sealed class XFOnlineTTSService : ITTSService
         var text = builder.ToString(0, count);
         builder.Remove(0, count);
         return text;
+    }
+
+    private void CompleteSuccessfully()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 1, 0) != 0) return;
+        try { Completed?.Invoke(); } finally { completionSource.TrySetResult(true); }
+    }
+
+    private void CompleteWithError(string message, Exception exception)
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 2, 0) != 0) return;
+        try { Error?.Invoke(message); } finally { completionSource.TrySetException(exception); }
+    }
+
+    private void CompleteCancelled()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 3, 0) == 0) completionSource.TrySetCanceled();
     }
 
     private void ValidateConfig()

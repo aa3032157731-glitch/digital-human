@@ -445,6 +445,7 @@ internal static class VoiceInputVolumeIndicatorBootstrap
 
     private static void TryInstall(Scene scene)
     {
+        if (UnityEngine.Object.FindObjectOfType<AdvancedSettingsPanel>(true) != null) return;
         if (!scene.IsValid() || !string.Equals(scene.name, MainSceneName, StringComparison.OrdinalIgnoreCase))
         {
             return;

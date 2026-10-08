@@ -24,7 +24,8 @@ public sealed class DoubaoTTSService : ITTSService
     private readonly ConcurrentQueue<string> textQueue = new ConcurrentQueue<string>();
     private readonly TaskCompletionSource<bool> completionSource = new TaskCompletionSource<bool>();
     private CancellationTokenSource internalCts;
-    private bool inputCompleted;
+    private volatile bool inputCompleted;
+    private int terminalState;
 
     public DoubaoTTSService(DoubaoTTSConfig config, string voiceInstruction, string sectionId)
     {
@@ -43,7 +44,8 @@ public sealed class DoubaoTTSService : ITTSService
         }
 
         internalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _ = Task.Run(() => WorkerLoopAsync(internalCts.Token));
+        var token = internalCts.Token;
+        _ = Task.Run(() => WorkerLoopAsync(token));
         return Task.CompletedTask;
     }
 
@@ -69,13 +71,15 @@ public sealed class DoubaoTTSService : ITTSService
 
     public Task CancelAsync()
     {
-        internalCts?.Cancel();
+        CompleteCancelled();
+        try { internalCts?.Cancel(); } catch (ObjectDisposedException) { }
         return Task.CompletedTask;
     }
 
     public void Dispose()
     {
-        internalCts?.Cancel();
+        CompleteCancelled();
+        try { internalCts?.Cancel(); } catch (ObjectDisposedException) { }
         internalCts?.Dispose();
     }
 
@@ -111,21 +115,22 @@ public sealed class DoubaoTTSService : ITTSService
                 await Task.Delay(Math.Max(5, config.textPollIntervalMs), cancellationToken);
             }
 
-            completionSource.TrySetResult(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            CompleteSuccessfully();
         }
         catch (OperationCanceledException)
         {
-            completionSource.TrySetCanceled();
+            CompleteCancelled();
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteCancelled();
         }
         catch (Exception ex)
         {
-            Error?.Invoke($"Doubao TTS failed: {ex.Message}");
-            completionSource.TrySetException(ex);
+            CompleteWithError($"Doubao TTS failed: {ex.Message}", ex);
         }
-        finally
-        {
-            Completed?.Invoke();
-        }
+
     }
 
     private async Task SynthesizeOnceAsync(string text, CancellationToken cancellationToken)
@@ -151,7 +156,8 @@ public sealed class DoubaoTTSService : ITTSService
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        using (var reader = new StreamReader(bodyStream, Encoding.UTF8))
+                        using (cancellationToken.Register(() => bodyStream.Dispose()))
+        using (var reader = new StreamReader(bodyStream, Encoding.UTF8))
                         {
                             var errorBody = await reader.ReadToEndAsync();
                             throw new InvalidOperationException($"Doubao TTS HTTP {(int)response.StatusCode}: {errorBody}");
@@ -238,11 +244,12 @@ public sealed class DoubaoTTSService : ITTSService
 
     private async Task ReadSseAsync(Stream bodyStream, CancellationToken cancellationToken)
     {
+        using (cancellationToken.Register(() => bodyStream.Dispose()))
         using (var reader = new StreamReader(bodyStream, Encoding.UTF8))
         {
             var dataBuilder = new StringBuilder();
 
-            while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 var line = await reader.ReadLineAsync();
                 if (line == null)
@@ -300,8 +307,7 @@ public sealed class DoubaoTTSService : ITTSService
 
         if (code != 0 && code != 20000000)
         {
-            Error?.Invoke($"Doubao TTS error {code}: {message}");
-            return true;
+            throw new InvalidOperationException($"Doubao TTS error {code}: {message}");
         }
 
         var audioBase64 = root["data"]?.ToString();
@@ -336,6 +342,23 @@ public sealed class DoubaoTTSService : ITTSService
     private static int Clamp(int value, int min, int max)
     {
         return Math.Min(max, Math.Max(min, value));
+    }
+
+    private void CompleteSuccessfully()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 1, 0) != 0) return;
+        try { Completed?.Invoke(); } finally { completionSource.TrySetResult(true); }
+    }
+
+    private void CompleteWithError(string message, Exception exception)
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 2, 0) != 0) return;
+        try { Error?.Invoke(message); } finally { completionSource.TrySetException(exception); }
+    }
+
+    private void CompleteCancelled()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 3, 0) == 0) completionSource.TrySetCanceled();
     }
 
     private void ValidateConfig()

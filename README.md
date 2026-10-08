@@ -1,6 +1,8 @@
 # customDigitalman
 
-Unity 数字人语音交互项目。当前版本以 `main` 场景为核心，把 3D 数字人、360 环境、语音识别、DeepSeek 对话、三种 TTS、SALSA 口型同步、摄像头情绪识别、会话记忆、本地知识库和百度千帆联网搜索整合在一起。
+口型新增 Azure 连续动画路径：按小句获取音频和面部动画，使用播放时间轴驱动 test / girl 的嘴部，并保留 Viseme / SALSA 降级。使用方法、模型映射和同音频 A/B 校准见 [连续口型说明](Docs/ContinuousLipSync.md)。
+
+Unity 数字人语音交互项目。当前版本以 `main` 场景为核心，把 3D 数字人、360 环境、语音识别、DeepSeek 对话、四种 TTS、SALSA 口型同步、摄像头情绪识别、会话记忆、本地知识库和百度千帆联网搜索整合在一起。
 
 ## 项目环境
 
@@ -75,6 +77,7 @@ Unity 数字人语音交互项目。当前版本以 `main` 场景为核心，把
 
 ```text
 Assets/MyCharacter/Config/
+  AzureTTSConfig.asset
   BaiduSearchConfig.asset
   DeepSeekConfig.asset
   DoubaoTTSConfig.asset
@@ -89,6 +92,7 @@ Assets/MyCharacter/Config/
 Create > Voice Chat > Configs > XF ASR Config
 Create > Voice Chat > Configs > XF TTS Config
 Create > Voice Chat > Configs > XF Online TTS Config
+Create > Voice Chat > Configs > Azure TTS Config
 Create > Voice Chat > Configs > Doubao TTS Config
 Create > Voice Chat > Configs > DeepSeek Config
 Create > Voice Chat > Configs > Baidu Search Config
@@ -138,12 +142,13 @@ thinking.type = disabled
 
 ### TTS Provider
 
-`VoiceChatController` 当前支持三种 TTS：
+`VoiceChatController` 当前支持四种 TTS：
 
 ```text
 XunfeiSuperSmart = 讯飞超拟人 TTS
 XunfeiOnline     = 讯飞在线 TTS
 Doubao           = 豆包语音合成模型 2.0
+AzureSpeech      = 微软 Azure Speech（全球版）
 ```
 
 #### 讯飞超拟人 TTS
@@ -175,13 +180,35 @@ Doubao           = 豆包语音合成模型 2.0
 - 支持 `additions.context_texts` 语音指令；可用静态指令，也可先让 DeepSeek 根据用户文本和情绪快照生成一句语音指令
 - `useSectionId` 开启时，会用当前会话 ID 作为稳定上下文 ID
 
+### Azure Speech
+
+高级设置 → **Azure TTS**：填写 Speech 资源的 Key 和区域代码（例如 `eastasia`，必须与资源实际区域一致），设置音色后点击 **试听 Azure**。试听使用当前草稿，不修改已保存的提供方；点击 **选择 Azure 朗读**，再 **应用并保存**即可启用。**停止试听**会立即清除音频并取消请求。
+
+- 默认音色：`zh-CN-XiaoxiaoNeural`，语言：`zh-CN`。区域和密钥默认留空。
+- 风格留空或 `neutral` 使用自然语气；可填写音色支持的 `cheerful` 等风格。服务会查询当前区域的音色列表并验证风格，缓存 10 分钟。
+- 风格强度范围 `0.01–2`；语速变化 `-50–100%`；音调变化 `-50–50%`；音量 `0–100`。音色和风格支持情况以 Azure 为准。
+- 使用官方 REST `https://{region}.tts.speech.microsoft.com/cognitiveservices/v1`，SSML 输入、`raw-24khz-16bit-mono-pcm` 流式输出。无需另装 Speech SDK 或解码器。
+- 文本按短句顺序合成，音频边到边播；首段目标 12 字／最长等待 180ms，后续目标 24 字／最长等待 300ms，单段上限 80 字。可以在配置资产或 JSON 的 `azureTts` 段调整分段参数。
+- 默认首包和连续无音频超时 10 秒，单段总超时 30 秒。鉴权、限流、音色不支持、空音频、连接失败会停止朗读，保留模型的文字回答；不自动重播已开始的句子。
+- 本版范围为全球版预置音色与手动 SSML 语气控制，不包含自定义声音、原生 TextStream 或自动情绪分析。
+
+配置文件仍为 `Application.persistentDataPath/RuntimeConfig/voice-chat-settings.json`。Windows 本项目的默认位置为 `%USERPROFILE%/AppData/LocalLow/Camelminger/customDigitalman/RuntimeConfig/voice-chat-settings.json`。schema 5 会兼容旧配置，补齐 `azureTts`、`playback`，不改变已有 TTS 选择。真实密钥请通过本机设置填写，不写入提交的资产。
+
+官方参考：[REST 接口](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech)、[SSML 风格与参数](https://learn.microsoft.com/zh-cn/azure/ai-services/speech-service/speech-synthesis-markup-voice)。
+
 ## 口型、音频和动画
 
 `StreamingPcmAudioPlayer` 使用非 streamed 的动态 `AudioClip`：
 
 ```text
-TTS raw PCM -> AudioClip.SetData() -> AudioSource -> SALSA.GetData()
+TTS raw PCM -> 带会话编号的有界音频队列 -> AudioClip.SetData() -> AudioSource -> SALSA.GetData()
 ```
+
+高级设置 → **音频缓冲**提供四种 TTS 共用的参数：起播默认 `0.12s`、补缓冲恢复门槛默认 `0.20s`、待写音频队列上限默认 `120s`。30 秒环形 AudioClip 只写入空闲区，已经消费的区域清零；DSP 定时结束边界防止主线程卡顿时播放越过有效数据。输入结束后会排空尾音再停止，补缓冲恢复不会从头重播或重新随机说话动作。
+
+网络抖动仍可能产生停顿：可适当增加起播／恢复门槛，以首音等待时间换取连续性。队列超限会明确报错并停止本轮朗读，不覆盖未播放样本。播放器只接受单声道 PCM16，保留跨包残余字节；取消、退出、换流会清理队列和旧 AudioClip。
+
+开启“输出音频性能诊断”后，正常播放结束会记录首 PCM、首音时间、补缓冲次数和队列峰值。首音指标包含本地等待，不应与云端合成耗时混为一谈。
 
 这样做是为了兼容 SALSA。SALSA 会对 `AudioSource.clip` 调用 `AudioClip.GetData()`，Unity streamed clip 不支持这个调用。不要把当前 TTS 播放器改回 `AudioClip.Create(..., stream: true, ...)`。
 
@@ -350,3 +377,30 @@ https://qianfan.baidubce.com/v2/ai_search/web_search
 - 不要随意改 `Assets/Plugins` 下的第三方插件，除非任务本身就是插件适配。
 - 当前播放器只处理 16-bit little-endian PCM。要支持 MP3/lame 等格式，需要新增解码层。
 - 包含中文的文件建议保持 UTF-8；编辑 C# 字符串、README 或 Unity YAML 前先确认编码，避免再次出现乱码。
+
+## Azure 与音频验证
+
+使用 Unity 2022.3.62f3 的 `-batchmode -projectPath <项目绝对路径> -executeMethod <方法> -logFile <日志路径>`：
+
+- `AzureTtsValidation.Run`：离线传输、SSML、随机 PCM 分包、加速模拟 10 分钟音频环、溢出、取消、配置迁移与场景绑定。异步入口会自行退出，不加 `-quit`。
+- `AzureTtsPlayModeValidation.Run`：加 `-forceAudio`，在空场景运行真实播放时钟和 AudioSource 输出检测，覆盖 100/300/1000ms 断流、跨环及 50 次打断。入口自行退出；不访问订阅。
+- `ChatFeatureValidation.Run`：先启动 `python Tools/chat_mock_server.py`，回归已有聊天功能，入口自行退出。
+- `AzureTtsBuildValidation.Build`：加 `-quit`，构建 Windows x64 开发版到项目旁 `garbage/AzureWindows/`。
+- `AzureTtsBuildValidation.Preview`：加 `-quit`，使用隔离的无密钥配置渲染设置页到项目旁 `garbage/`。
+- `AzureTtsSceneSetup.Install`：已执行并保存了实际场景；只有需要重新安装 Azure 控件时才运行此方法或相应 Tools 菜单。
+
+离线验证不能替代真实订阅联调。首次使用请在本机填好区域和 Key，试听中文、中英混合与所需风格，再在实际角色上检查口型。401/403 检查 Key、区域和权限；429 检查配额并稍后重试；不支持的风格可留空恢复自然语气。
+
+## 统一助手界面（2026-09-14）
+
+`main` 场景已保存 `AssistantInterface` 画布，并通过 `AdvancedSettingsPanel.interfaceRoot` 绑定；旧设置入口和旧记忆面板已在场景中停用。重新进入 Play 模式后，新控制面板在右侧显示。账号、模型列表和草稿表单由 uGUI 根据当前配置生成。
+
+- 右侧面板：设置入口、历史会话、聊天输入、记忆与知识库折叠区及横向麦克风电平表。历史与知识库互斥展开，避免挤出输入区；收起后仍可进入设置。
+- 设置 → 服务来源：集中管理密钥、地址、区域等信息；同一服务可以建立多个账号。
+- 设置 → 机体模块：意识选择服务账号和模型，发声选择账号与音色，听觉/搜索/记忆/知识库保留对应参数。
+- 配置使用独立草稿，点击“保存并应用”才启用；关闭未保存的窗口会提示。凭据修改会作用于引用此账号的模型，模型的采样参数仍独立。
+- 配置升级到 v6，首次覆盖旧版本前保留同目录 `.v5.bak` 原文件，写入使用临时文件和原子替换。运行时旧服务仍通过兼容适配读取配置。
+- DeepSeek 与兼容服务读取模型列表，Azure 读取音色/语言/风格；失败保留缓存和手动 ID。火山方舟、豆包和讯飞保留手动 ID，不假设账号拥有官网展示的全部资源。
+- 四种 TTS 均提供草稿试听。试听结束当前回复播放，不修改正式服务选择或聊天历史；关闭或切换页面会取消试听。
+
+验证入口：`AssistantUiValidation.Run` 在隔离测试项目中执行配置/目录列表模拟测试并将界面截图写入 `ValidationArtifacts/`。`AzureTtsPlayModeValidation.Run` 还覆盖统一试听的完成、取消、替换和服务选择保持。测试项目必须使用独立目录，避免影响正在编辑的场景；这些检查使用模拟凭据，不访问真实订阅。

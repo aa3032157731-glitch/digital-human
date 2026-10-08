@@ -23,7 +23,8 @@ public sealed class XFTTSService : ITTSService
     private Task sendTask;
     private Task receiveTask;
     private int sequence;
-    private bool inputCompleted;
+    private volatile bool inputCompleted;
+    private int terminalState;
     private bool sentFirstFrame;
 
     public XFTTSService(XFTTSConfig config)
@@ -46,8 +47,9 @@ public sealed class XFTTSService : ITTSService
 
         await webSocket.ConnectAsync(uri, internalCts.Token);
 
-        sendTask = Task.Run(() => SendLoopAsync(internalCts.Token));
-        receiveTask = Task.Run(() => ReceiveLoopAsync(internalCts.Token));
+        var token = internalCts.Token;
+        sendTask = Task.Run(() => SendLoopAsync(token));
+        receiveTask = Task.Run(() => ReceiveLoopAsync(token));
     }
 
     public void EnqueueText(string text)
@@ -70,26 +72,18 @@ public sealed class XFTTSService : ITTSService
         return completionSource.Task;
     }
 
-    public async Task CancelAsync()
+    public Task CancelAsync()
     {
-        try
-        {
-            internalCts?.Cancel();
-
-            if (webSocket != null && webSocket.State == WebSocketState.Open)
-            {
-                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "cancel", CancellationToken.None);
-            }
-        }
-        catch
-        {
-            webSocket?.Abort();
-        }
+        CompleteCancelled();
+        try { internalCts?.Cancel(); webSocket?.Abort(); } catch (ObjectDisposedException) { }
+        CompleteCancelled();
+        return Task.CompletedTask;
     }
 
     public void Dispose()
     {
-        internalCts?.Cancel();
+        CompleteCancelled();
+        try { internalCts?.Cancel(); } catch (ObjectDisposedException) { }
         webSocket?.Dispose();
         internalCts?.Dispose();
     }
@@ -132,10 +126,13 @@ public sealed class XFTTSService : ITTSService
         catch (OperationCanceledException)
         {
         }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteCancelled();
+        }
         catch (Exception ex)
         {
-            Error?.Invoke($"XF TTS send failed: {ex.Message}");
-            completionSource.TrySetException(ex);
+            CompleteWithError($"XF TTS send failed: {ex.Message}", ex);
         }
     }
 
@@ -150,7 +147,7 @@ public sealed class XFTTSService : ITTSService
                 var message = await ReceiveTextAsync(cancellationToken);
                 if (string.IsNullOrEmpty(message))
                 {
-                    break;
+                    throw new IOException("TTS connection closed before the final audio frame.");
                 }
 
                 if (HandleResponse(message))
@@ -159,21 +156,22 @@ public sealed class XFTTSService : ITTSService
                 }
             }
 
-            completionSource.TrySetResult(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            CompleteSuccessfully();
         }
         catch (OperationCanceledException)
         {
-            completionSource.TrySetCanceled();
+            CompleteCancelled();
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteCancelled();
         }
         catch (Exception ex)
         {
-            Error?.Invoke($"XF TTS receive failed: {ex.Message}");
-            completionSource.TrySetException(ex);
+            CompleteWithError($"XF TTS receive failed: {ex.Message}", ex);
         }
-        finally
-        {
-            Completed?.Invoke();
-        }
+
     }
 
     private async Task SendTextFrameAsync(string text, int status, CancellationToken cancellationToken)
@@ -261,8 +259,7 @@ public sealed class XFTTSService : ITTSService
         if (code != 0)
         {
             var message = header?["message"]?.ToString() ?? "unknown error";
-            Error?.Invoke($"XF TTS error {code}: {message}");
-            return true;
+            throw new InvalidOperationException($"XF TTS error {code}: {message}");
         }
 
         var audioBase64 = root["payload"]?["audio"]?["audio"]?.ToString();
@@ -320,6 +317,23 @@ public sealed class XFTTSService : ITTSService
         var text = builder.ToString(0, count);
         builder.Remove(0, count);
         return text;
+    }
+
+    private void CompleteSuccessfully()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 1, 0) != 0) return;
+        try { Completed?.Invoke(); } finally { completionSource.TrySetResult(true); }
+    }
+
+    private void CompleteWithError(string message, Exception exception)
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 2, 0) != 0) return;
+        try { Error?.Invoke(message); } finally { completionSource.TrySetException(exception); }
+    }
+
+    private void CompleteCancelled()
+    {
+        if (Interlocked.CompareExchange(ref terminalState, 3, 0) == 0) completionSource.TrySetCanceled();
     }
 
     private void ValidateConfig()

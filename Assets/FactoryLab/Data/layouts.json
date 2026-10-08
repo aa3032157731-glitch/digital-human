@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "coordinateSystem": "factory-floor-xz",
+  "factorySizeM": { "x": 12, "z": 8 },
+  "walkway": { "z": 4, "widthM": 2, "routing": "handoff-to-central-aisle" },
+  "legalPositions": {
+    "A": { "x": 2, "z": 2, "port": { "x": 2, "z": 3 }, "fixedStationId": "material-storage" },
+    "B": { "x": 6, "z": 2, "port": { "x": 6, "z": 3 } },
+    "C": { "x": 10, "z": 2, "port": { "x": 10, "z": 3 } },
+    "D": { "x": 2, "z": 6, "port": { "x": 2, "z": 5 } },
+    "E": { "x": 6, "z": 6, "port": { "x": 6, "z": 5 } },
+    "F": { "x": 10, "z": 6, "port": { "x": 10, "z": 5 }, "fixedStationId": "finished-goods-storage" }
+  },
+  "stationSwapPolicy": { "movable": ["assembly", "fastening", "inspection", "packaging"], "fixed": ["material-storage", "finished-goods-storage"] },
+  "layouts": [
+    {
+      "id": "baseline",
+      "displayName": "原始布局",
+      "positions": { "material-storage": "A", "packaging": "B", "fastening": "C", "inspection": "D", "assembly": "E", "finished-goods-storage": "F" },
+      "routeLegDistancesM": [6, 6, 10, 6, 6],
+      "singleProductLoadedDistanceM": 34,
+      "teachingPurpose": "观察工位分散、折返和较长搬运"
+    },
+    {
+      "id": "reference-improved",
+      "displayName": "参考改善布局",
+      "positions": { "material-storage": "A", "inspection": "B", "packaging": "C", "assembly": "D", "fastening": "E", "finished-goods-storage": "F" },
+      "routeLegDistancesM": [2, 6, 2, 6, 2],
+      "singleProductLoadedDistanceM": 18,
+      "teachingPurpose": "比较路线缩短后是否仍存在工位瓶颈"
+    }
+  ],
+  "distanceMethod": "handoff via central aisle z=4 to destination handoff; same handoff has zero distance",
+  "expectedChecks": { "baselineLoadedDistanceM": 34, "referenceImprovedLoadedDistanceM": 18, "sameProcessTimeSeconds": 120, "baselineSinglePieceSeconds": 174, "referenceSinglePieceSeconds": 158 }
+}

@@ -18,7 +18,8 @@ public enum TTSProvider
 {
     XunfeiSuperSmart,
     XunfeiOnline,
-    Doubao
+    Doubao,
+    AzureSpeech
 }
 
 public class VoiceChatController : MonoBehaviour
@@ -36,6 +37,17 @@ public class VoiceChatController : MonoBehaviour
     public bool readRepliesAloud = true;
     public bool IsGenerating { get; private set; }
     public string ChatStatus { get; private set; } = "就绪";
+    // Optional scene-owned context. Normal assistant scenes leave this unset.
+    [NonSerialized] public Func<string, string> SceneContextProvider;
+    public string sceneMemoryFolder;
+    private void ApplySceneMemoryScope()
+    {
+        if (string.IsNullOrWhiteSpace(sceneMemoryFolder)) return;
+        persistentDataFolder = sceneMemoryFolder;
+        enablePersistentConversation = false; loadLatestConversationOnStart = false;
+        enableKnowledgeBase = false; injectFullKnowledgeBaseOnNewConversation = false;
+        enableAgentTools = false; enablePushToTalk = false;
+    }
     private int asrGeneration;
     private bool asrStarting;
 
@@ -52,7 +64,7 @@ public class VoiceChatController : MonoBehaviour
         return true;
     }
 
-    private void CancelVoiceInput()
+    public void CancelVoiceInput()
     {
         ++asrGeneration;
         asrStarting = false;
@@ -91,6 +103,9 @@ public class VoiceChatController : MonoBehaviour
 
     [Tooltip("Doubao speech synthesis model 2.0 config.")]
     public DoubaoTTSConfig doubaoTtsConfig;
+    public AzureTTSConfig azureTtsConfig;
+    private CancellationTokenSource previewCts;
+    private string lastTtsError;
 
     [Header("Audio Output")]
     [Tooltip("AudioSource used by the TTS stream. Bind SALSA.audioSrc to this same AudioSource.")]
@@ -98,6 +113,25 @@ public class VoiceChatController : MonoBehaviour
 
     [Tooltip("Dynamic PCM player that feeds Xunfei raw PCM into the AudioSource.")]
     public StreamingPcmAudioPlayer streamingPlayer;
+    public AlignedMouthPlayback mouthPlayback;
+    public MouthTuning testMouth = new MouthTuning();
+    public MouthTuning girlMouth = new MouthTuning();
+    public string MouthStatus => mouthPlayback != null ? mouthPlayback.Status : "SALSA";
+
+    public void ApplyMouthTuning()
+    {
+        foreach (var driver in FindObjectsOfType<AlignedMouthDriver>(true))
+            driver.tuning = (driver.profile != null && driver.profile.modelName == "girl" ? girlMouth : testMouth).Copy();
+    }
+    private static ITTSService CreateAzureSpeech(AzureTTSSettings settings) => settings != null && settings.continuousLipSync
+        ? (ITTSService)new AzureFacialTTSService(settings) : new AzureTTSService(settings);
+    private bool BeginAlignedSpeech(ITTSService service, long streamId)
+    {
+        if (!(service is IAlignedTTSService aligned)) { mouthPlayback?.UseLegacy(); return false; }
+        if (mouthPlayback == null) mouthPlayback = GetComponent<AlignedMouthPlayback>();
+        if (mouthPlayback == null) throw new InvalidOperationException("未安装口型时间轴组件。");
+        mouthPlayback.Begin(aligned, streamId); return true;
+    }
 
     [Header("Talk Animation")]
     [Tooltip("Animator that owns the isTalk bool. Leave empty to auto-find it in the scene.")]
@@ -247,6 +281,7 @@ public class VoiceChatController : MonoBehaviour
     private void Awake()
     {
         VoiceChatRuntimeConfigStore.ApplySavedSettings(this);
+        ApplySceneMemoryScope();
 
         if (ttsAudioSource == null)
         {
@@ -280,6 +315,7 @@ public class VoiceChatController : MonoBehaviour
 
     private void OnDisable()
     {
+        InterruptAssistantOutput();
         UnsubscribeStreamingPlayer();
         SetTalkAnimation(false);
     }
@@ -300,6 +336,11 @@ public class VoiceChatController : MonoBehaviour
         }
 
         var selected = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+        if (AssistantSettingsHub.ModalOpen)
+        {
+            if (Input.GetKeyUp(pushToTalkKey) && (isListening || asrStarting)) CancelVoiceInput();
+            return;
+        }
         if (selected != null && selected.GetComponentInParent<InputField>() != null)
         {
             if (Input.GetKeyUp(pushToTalkKey) && isListening) StopListening();
@@ -407,7 +448,9 @@ public class VoiceChatController : MonoBehaviour
 
     public void InterruptAssistantOutput()
     {
+        mouthPlayback?.Clear();
         turnCts?.Cancel();
+        previewCts?.Cancel();
         ttsPlaybackGeneration++;
         IsGenerating = false;
         ChatStatus = "已停止";
@@ -594,10 +637,23 @@ public class VoiceChatController : MonoBehaviour
         return knowledgeBaseStore.FormatDocumentList();
     }
 
+    [NonSerialized] public List<ServiceAccount> serviceAccounts = new List<ServiceAccount>();
+
     public RuntimeVoiceChatSettings CaptureRuntimeSettings()
     {
         VoiceChatRuntimeConfigStore.EnsureRuntimeConfigInstances(this);
-        return VoiceChatRuntimeConfigStore.CaptureFrom(this);
+        var settings = VoiceChatRuntimeConfigStore.CaptureFrom(this);
+        if (!string.IsNullOrWhiteSpace(sceneMemoryFolder))
+        {
+            var shared = VoiceChatRuntimeConfigStore.LoadSettings();
+            if (shared != null)
+            {
+                settings.memory = shared.memory; settings.knowledge = shared.knowledge; settings.agentTools = shared.agentTools;
+                settings.features.enablePushToTalk = shared.features.enablePushToTalk;
+                settings.features.listenOnStart = shared.features.listenOnStart;
+            }
+        }
+        return settings;
     }
 
     public void ApplyRuntimeSettings(RuntimeVoiceChatSettings settings)
@@ -608,12 +664,17 @@ public class VoiceChatController : MonoBehaviour
         }
 
         var previousPersistentDataFolder = persistentDataFolder;
+        if (isListening || asrStarting) CancelVoiceInput();
         var previousConversationsFolderName = conversationsFolderName;
         var previousKnowledgeBaseFolderName = knowledgeBaseFolderName;
         var previousEnablePersistentConversation = enablePersistentConversation;
         var previousEnableKnowledgeBase = enableKnowledgeBase;
 
+        streamingPlayer?.StopAndClear();
+        if (ttsService != null) _ = ttsService.CancelAsync();
+        previewCts?.Cancel();
         VoiceChatRuntimeConfigStore.ApplyTo(this, settings);
+        ApplySceneMemoryScope();
 
         var shouldReinitializeStores =
             previousEnablePersistentConversation != enablePersistentConversation ||
@@ -806,7 +867,9 @@ public class VoiceChatController : MonoBehaviour
         ChatSessionRecord session = null;
         var conversationGeneration = 0;
         var answer = new StringBuilder();
+        lastTtsError = null;
         bool audioFailed = false;
+        long lastAudioTicks = DateTime.UtcNow.Ticks;
         bool speak = readRepliesAloud;
         IsGenerating = true;
         ChatStatus = "正在回答…";
@@ -829,23 +892,30 @@ public class VoiceChatController : MonoBehaviour
                     token.ThrowIfCancellationRequested();
                     audio = CreateTtsService(instruction);
                     ttsService = audio;
-                    audio.AudioChunkReceived += bytes => EnqueueMainThread(() =>
+                    var player = streamingPlayer;
+                    if (player == null) throw new InvalidOperationException("未绑定音频播放器。");
+                    var streamId = player.BeginStream(audio.OutputSampleRate, 1);
+                    bool alignedSpeech = BeginAlignedSpeech(audio, streamId);
+                    Interlocked.Exchange(ref lastAudioTicks, DateTime.UtcNow.Ticks);
+                    audio.AudioChunkReceived += bytes =>
                     {
-                        if (generation == ttsPlaybackGeneration && readRepliesAloud && !audioFailed)
-                            streamingPlayer?.AppendPcm16LittleEndian(bytes);
-                    });
+                        Interlocked.Exchange(ref lastAudioTicks, DateTime.UtcNow.Ticks);
+                        if (!alignedSpeech && generation == ttsPlaybackGeneration && readRepliesAloud && !audioFailed)
+                            player.EnqueuePcm(streamId, bytes);
+                    };
                     audio.Error += message => EnqueueMainThread(() =>
                     {
                         if (generation != ttsPlaybackGeneration) return;
                         audioFailed = true;
-                        ChatStatus = "朗读不可用，继续文字回答";
+                        lastTtsError = message;
+                        if (audio != null) _ = audio.CancelAsync();
+                        ChatStatus = "朗读不可用，继续文字回答：" + message;
                         streamingPlayer?.StopAndClear();
                     });
-                    audio.Completed += () => EnqueueMainThread(() =>
+                    audio.Completed += () =>
                     {
-                        if (generation == ttsPlaybackGeneration) streamingPlayer?.EndStream();
-                    });
-                    streamingPlayer?.BeginStream(audio.OutputSampleRate, 1);
+                        if (!alignedSpeech && generation == ttsPlaybackGeneration && !audioFailed) player.EndStream(streamId);
+                    };
                     var start = audio.StartAsync(token);
                     if (await Task.WhenAny(start, Task.Delay(8000, token)) != start)
                         throw new TimeoutException();
@@ -865,12 +935,19 @@ public class VoiceChatController : MonoBehaviour
             {
                 token.ThrowIfCancellationRequested();
                 if (generation != ttsPlaybackGeneration) return;
+                delta = StripAssistantAsterisks(delta);
+                if (string.IsNullOrEmpty(delta)) return;
                 answer.Append(delta);
                 AppendAssistantDelta(session, conversationGeneration, record, delta);
                 if (audio != null && !audioFailed && readRepliesAloud)
                 {
                     try { audio.EnqueueText(delta); }
-                    catch { audioFailed = true; }
+                    catch
+                    {
+                        audioFailed = true;
+                        _ = audio.CancelAsync();
+                        EnqueueMainThread(() => { if (generation == ttsPlaybackGeneration) streamingPlayer?.StopAndClear(); });
+                    }
                 }
                 EnqueueMainThread(() =>
                 {
@@ -888,13 +965,21 @@ public class VoiceChatController : MonoBehaviour
                 {
                     audio.CompleteInput();
                     var finish = audio.WaitForCompletionAsync();
-                    if (await Task.WhenAny(finish, Task.Delay(60000, token)) == finish) await finish;
-                    else { audioFailed = true; _ = audio.CancelAsync(); }
+                    Interlocked.Exchange(ref lastAudioTicks, DateTime.UtcNow.Ticks);
+                    while (!finish.IsCompleted)
+                    {
+                        await Task.WhenAny(finish, Task.Delay(250, token));
+                        token.ThrowIfCancellationRequested();
+                        if (!(audio is IAlignedTTSService) && DateTime.UtcNow.Ticks - Interlocked.Read(ref lastAudioTicks) > TimeSpan.FromSeconds(30).Ticks)
+                            throw new TimeoutException("TTS 连续 30 秒没有收到音频。");
+                    }
+                    await finish;
                 }
-                catch (Exception) when (!token.IsCancellationRequested) { audioFailed = true; }
+                catch (Exception) when (!token.IsCancellationRequested) { audioFailed = true; _ = audio.CancelAsync(); }
             }
             token.ThrowIfCancellationRequested();
-            ChatStatus = audioFailed ? "回复完成；朗读不可用" : "就绪";
+            audioFailed |= !string.IsNullOrEmpty(lastTtsError);
+            ChatStatus = audioFailed ? "回复完成；朗读不可用" + (string.IsNullOrEmpty(lastTtsError) ? "" : "：" + lastTtsError) : "就绪";
         }
         catch (Exception) when (token.IsCancellationRequested || generation != ttsPlaybackGeneration)
         {
@@ -909,6 +994,8 @@ public class VoiceChatController : MonoBehaviour
         }
         finally
         {
+            if (audio is AzureTTSService azure && streamingPlayer != null && streamingPlayer.logDiagnostics && !string.IsNullOrEmpty(azure.Diagnostics))
+                Debug.Log(azure.Diagnostics);
             audio?.Dispose();
             if (generation == ttsPlaybackGeneration)
             {
@@ -1053,12 +1140,114 @@ public class VoiceChatController : MonoBehaviour
         return clean;
     }
 
+    private void HandleTtsPlaybackError(string message)
+    {
+        if (ttsService != null) _ = ttsService.CancelAsync();
+        lastTtsError = message;
+        ChatStatus = "朗读不可用：" + message;
+        isSpeaking = false;
+        SetTalkAnimation(false);
+    }
+
+    public async Task PreviewAzureAsync(AzureTTSSettings settings)
+    {
+        await PreviewSpeechServiceAsync(CreateAzureSpeech(settings), "爸爸妈妈，乌云与圆月。你好，Hello, nice to meet you.", CancellationToken.None);
+    }
+    public Task ReplayMouthSampleAsync(AlignedSpeechSegment sample, bool salsa, CancellationToken token)
+    {
+        return PreviewSpeechServiceAsync(new RecordedSpeechService(sample, salsa), "录制口型回放", token);
+    }
+
+    public async Task PreviewSpeechAsync(RuntimeVoiceChatSettings draft, string text, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(text)) throw new InvalidOperationException("请输入试听文字。");
+        var snapshot = Newtonsoft.Json.JsonConvert.DeserializeObject<RuntimeVoiceChatSettings>(Newtonsoft.Json.JsonConvert.SerializeObject(draft));
+        snapshot.EnsureDefaults(); ServiceAccounts.Resolve(snapshot);
+        ScriptableObject config = null;
+        ITTSService service;
+        switch (snapshot.features.ttsProvider)
+        {
+            case "AzureSpeech": service = CreateAzureSpeech(snapshot.azureTts); break;
+            case "Doubao":
+                var doubao = ScriptableObject.CreateInstance<DoubaoTTSConfig>(); config = doubao;
+                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.doubaoTts), doubao);
+                service = new DoubaoTTSService(doubao, snapshot.doubaoTts.enableVoiceInstruction ? snapshot.doubaoTts.voiceInstruction : "", ""); break;
+            case "XunfeiOnline":
+                var online = ScriptableObject.CreateInstance<XFOnlineTTSConfig>(); config = online;
+                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.xunfeiOnlineTts), online);
+                service = new XFOnlineTTSService(online); break;
+            default:
+                var smart = ScriptableObject.CreateInstance<XFTTSConfig>(); config = smart;
+                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.xunfeiSuperSmartTts), smart);
+                service = new XFTTSService(smart); break;
+        }
+        foreach (var driver in FindObjectsOfType<AlignedMouthDriver>(true))
+            driver.tuning = (driver.profile != null && driver.profile.modelName == "girl" ? snapshot.girlMouth : snapshot.testMouth).Copy();
+        try { await PreviewSpeechServiceAsync(service, text, token); }
+        finally { ApplyMouthTuning(); if (config != null) Destroy(config); }
+    }
+
+    // Fixed teaching text bypasses chat generation, sharing PCM, cancellation and lip sync.
+    public Task SpeakTeachingTextAsync(string text, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return Task.CompletedTask;
+        return PreviewSpeechServiceAsync(CreateTtsService(""), text, token);
+    }
+
+    private async Task PreviewSpeechServiceAsync(ITTSService service, string text, CancellationToken token)
+    {
+        InterruptAssistantOutput();
+        int generation = ttsPlaybackGeneration;
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        cancellation.CancelAfter(TimeSpan.FromSeconds(60));
+        previewCts = cancellation;
+        using (service)
+        {
+            try
+            {
+                if (streamingPlayer == null) throw new InvalidOperationException("未绑定音频播放器。");
+                var player = streamingPlayer;
+                long id = player.BeginStream(service.OutputSampleRate);
+                ttsService = service;
+                if (!BeginAlignedSpeech(service, id))
+                {
+                    service.AudioChunkReceived += bytes => player.EnqueuePcm(id, bytes);
+                    service.Completed += () => player.EndStream(id);
+                }
+                await service.StartAsync(cancellation.Token);
+                service.EnqueueText(text);
+                service.CompleteInput();
+                await service.WaitForCompletionAsync();
+                while (generation == ttsPlaybackGeneration && player.State != PcmPlaybackState.Completed)
+                {
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    if (player.State == PcmPlaybackState.Failed || player.State == PcmPlaybackState.Cancelled)
+                        throw new InvalidOperationException("试听已停止或音频缓冲失败。");
+                    await Task.Delay(20, cancellation.Token);
+                }
+            }
+            catch
+            {
+                if (generation == ttsPlaybackGeneration) streamingPlayer?.StopAndClear();
+                throw;
+            }
+            finally
+            {
+                if (ReferenceEquals(ttsService, service)) ttsService = null;
+                if (ReferenceEquals(previewCts, cancellation)) previewCts = null;
+                cancellation.Dispose();
+            }
+        }
+    }
+
     private ITTSService CreateTtsService(string doubaoVoiceInstruction)
     {
         switch (ttsProvider)
         {
             case TTSProvider.XunfeiOnline:
                 return new XFOnlineTTSService(onlineTtsConfig);
+            case TTSProvider.AzureSpeech:
+                return CreateAzureSpeech(azureTtsConfig != null ? azureTtsConfig.settings : null);
             case TTSProvider.Doubao:
                 return new DoubaoTTSService(doubaoTtsConfig, doubaoVoiceInstruction, GetDoubaoSectionId());
             case TTSProvider.XunfeiSuperSmart:
@@ -1091,6 +1280,7 @@ public class VoiceChatController : MonoBehaviour
 
         UnsubscribeStreamingPlayer();
         subscribedStreamingPlayer = streamingPlayer;
+        subscribedStreamingPlayer.PlaybackError += HandleTtsPlaybackError;
         subscribedStreamingPlayer.PlaybackStarted += HandleTtsPlaybackStarted;
         subscribedStreamingPlayer.PlaybackStopped += HandleTtsPlaybackStopped;
     }
@@ -1102,6 +1292,7 @@ public class VoiceChatController : MonoBehaviour
             return;
         }
 
+        subscribedStreamingPlayer.PlaybackError -= HandleTtsPlaybackError;
         subscribedStreamingPlayer.PlaybackStarted -= HandleTtsPlaybackStarted;
         subscribedStreamingPlayer.PlaybackStopped -= HandleTtsPlaybackStopped;
         subscribedStreamingPlayer = null;
@@ -1110,7 +1301,7 @@ public class VoiceChatController : MonoBehaviour
     private void HandleTtsPlaybackStarted()
     {
         isSpeaking = true;
-        SetTalkAnimation(true);
+        SetTalkAnimation(true, streamingPlayer == null || !streamingPlayer.IsResume);
     }
 
     private void HandleTtsPlaybackStopped()
@@ -1199,7 +1390,7 @@ public class VoiceChatController : MonoBehaviour
         return false;
     }
 
-    private void SetTalkAnimation(bool value)
+    private void SetTalkAnimation(bool value, bool randomizeVariant = true)
     {
         if (talkAnimator == null)
         {
@@ -1218,7 +1409,7 @@ public class VoiceChatController : MonoBehaviour
             return;
         }
 
-        if (value
+        if (value && randomizeVariant
             && hasTalkVariantParameter
             && !TrySetAnimatorInteger(talkAnimator, talkVariantHash, UnityEngine.Random.Range(0, TalkAnimationVariantCount)))
         {
@@ -1677,6 +1868,7 @@ public class VoiceChatController : MonoBehaviour
     private string BuildRuntimeSystemContext(string userText, int promptMessageCount)
     {
         var builder = new StringBuilder();
+        if (SceneContextProvider != null) return SceneContextProvider(userText) ?? string.Empty;
 
         currentWebSearchContext = string.Empty;
         currentWebSearchStatus = string.Empty;
@@ -2300,12 +2492,19 @@ public class VoiceChatController : MonoBehaviour
 
     private static string GetDisplayMessageContent(string role, string content)
     {
+        if (role == "assistant") return StripAssistantAsterisks(content);
         if (role != "user" || string.IsNullOrEmpty(content))
         {
             return content;
         }
 
         return StripEmotionPromptBlock(content);
+    }
+
+    private static string StripAssistantAsterisks(string content)
+    {
+        // Filter each streamed fragment so split Markdown markers never reach the UI or TTS.
+        return content?.Replace("*", string.Empty);
     }
 
     private static string StripEmotionPromptBlock(string content)
