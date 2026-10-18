@@ -1163,28 +1163,11 @@ public class VoiceChatController : MonoBehaviour
         if (string.IsNullOrWhiteSpace(text)) throw new InvalidOperationException("请输入试听文字。");
         var snapshot = Newtonsoft.Json.JsonConvert.DeserializeObject<RuntimeVoiceChatSettings>(Newtonsoft.Json.JsonConvert.SerializeObject(draft));
         snapshot.EnsureDefaults(); ServiceAccounts.Resolve(snapshot);
-        ScriptableObject config = null;
-        ITTSService service;
-        switch (snapshot.features.ttsProvider)
-        {
-            case "AzureSpeech": service = CreateAzureSpeech(snapshot.azureTts); break;
-            case "Doubao":
-                var doubao = ScriptableObject.CreateInstance<DoubaoTTSConfig>(); config = doubao;
-                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.doubaoTts), doubao);
-                service = new DoubaoTTSService(doubao, snapshot.doubaoTts.enableVoiceInstruction ? snapshot.doubaoTts.voiceInstruction : "", ""); break;
-            case "XunfeiOnline":
-                var online = ScriptableObject.CreateInstance<XFOnlineTTSConfig>(); config = online;
-                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.xunfeiOnlineTts), online);
-                service = new XFOnlineTTSService(online); break;
-            default:
-                var smart = ScriptableObject.CreateInstance<XFTTSConfig>(); config = smart;
-                JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(snapshot.xunfeiSuperSmartTts), smart);
-                service = new XFTTSService(smart); break;
-        }
+        var service = SpeechServiceFactory.Create(snapshot, snapshot.features.ttsProvider, true, out var config);
         foreach (var driver in FindObjectsOfType<AlignedMouthDriver>(true))
             driver.tuning = (driver.profile != null && driver.profile.modelName == "girl" ? snapshot.girlMouth : snapshot.testMouth).Copy();
         try { await PreviewSpeechServiceAsync(service, text, token); }
-        finally { ApplyMouthTuning(); if (config != null) Destroy(config); }
+        finally { ApplyMouthTuning(); SpeechServiceFactory.Release(config); }
     }
 
     // Fixed teaching text bypasses chat generation, sharing PCM, cancellation and lip sync.
@@ -2437,6 +2420,33 @@ public class VoiceChatController : MonoBehaviour
     {
         currentConversationText = FormatConversationText(80);
         onConversationChanged?.Invoke(currentConversationText);
+    }
+
+    public string ActiveConversationTitle => enablePersistentConversation && activeSession != null ? activeSession.title : null;
+
+    // Displayable messages for the chat bubbles (same source and filtering as FormatConversationText).
+    public List<ConversationLine> GetConversationLines(int maxMessages)
+    {
+        EnsureMemoryStores();
+        var lines = new List<ConversationLine>();
+        if (enablePersistentConversation && activeSession != null)
+        {
+            var messages = activeSession.messages ?? new List<ChatMessageRecord>();
+            for (var i = Mathf.Max(0, messages.Count - Mathf.Max(1, maxMessages)); i < messages.Count; i++)
+            {
+                var message = messages[i];
+                if (message == null || !IsDisplayableConversationRole(message.role) || string.IsNullOrWhiteSpace(message.content)) continue;
+                lines.Add(new ConversationLine { role = message.role, text = GetDisplayMessageContent(message.role, message.content), status = message.status });
+            }
+            return lines;
+        }
+        foreach (var message in history)
+        {
+            if (!IsDisplayableConversationRole(message.role)) continue;
+            lines.Add(new ConversationLine { role = message.role, text = GetDisplayMessageContent(message.role, message.content), status = "completed" });
+        }
+        if (lines.Count > maxMessages) lines.RemoveRange(0, lines.Count - maxMessages);
+        return lines;
     }
 
     public string FormatConversationText(int maxMessages)

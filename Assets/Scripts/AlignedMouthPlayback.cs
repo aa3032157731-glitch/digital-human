@@ -23,7 +23,7 @@ public sealed class AlignedMouthPlayback : MonoBehaviour
     private readonly List<Entry> timeline = new List<Entry>();
     private readonly float[] channels = new float[55];
     private IAlignedTTSService source;
-    private AlignedMouthDriver active;
+    private IAlignedMouthTarget active;
     private long streamId, acceptedSamples;
     private int expectedSequence;
     private bool ended;
@@ -75,7 +75,7 @@ public sealed class AlignedMouthPlayback : MonoBehaviour
         while (timeline.Count > 0 && played >= timeline[0].start + timeline[0].data.SampleCount)
         { source.AcknowledgeSegment(timeline[0].data.sequence); timeline.RemoveAt(0); }
         var root = modelSwitcher != null ? modelSwitcher.GetCurrentModelRoot() : null;
-        var next = root != null ? root.GetComponent<AlignedMouthDriver>() : null;
+        var next = root != null ? root.GetComponent<IAlignedMouthTarget>() : null;
         if (next != active) { active?.Release(true); active = next; }
         if (player.State == PcmPlaybackState.Completed)
         { active?.Release(); Clear(); return; }
@@ -87,7 +87,7 @@ public sealed class AlignedMouthPlayback : MonoBehaviour
             Status = "SALSA · " + (active == null || !active.HasMapping ? "当前角色缺少映射" : current.data.fallbackReason);
             return;
         }
-        double seconds = (played - current.start) / (double)player.SampleRate + active.tuning.lipSyncOffsetMs / 1000.0;
+        double seconds = (played - current.start) / (double)player.SampleRate + active.Tuning.lipSyncOffsetMs / 1000.0;
         current.data.Sample(Math.Max(0, seconds), channels); active.Apply(channels);
         Status = current.data.mode == MouthAnimationMode.BlendShapes ? "连续口型" : "Viseme · " + current.data.fallbackReason;
     }

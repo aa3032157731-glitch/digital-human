@@ -60,3 +60,10 @@ public sealed class ChatSessionSummary
     public string filePath;
     public int messageCount;
 }
+
+public sealed class ConversationLine
+{
+    public string role;
+    public string text;
+    public string status;
+}

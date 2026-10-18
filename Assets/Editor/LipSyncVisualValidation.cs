@@ -22,6 +22,7 @@ public static class LipSyncVisualValidation
             foreach (var root in switcher.modelRoots) root.SetActive(false);
             foreach (var root in switcher.modelRoots)
             {
+                if (root.GetComponent<VrmMouthDriver>() != null) continue; // Covered by VrmCharacterValidation.
                 root.SetActive(true);
                 var driver = root.GetComponent<AlignedMouthDriver>();
                 var head = root.GetComponentsInChildren<Transform>().First(t => t.name == "CC_Base_Head");

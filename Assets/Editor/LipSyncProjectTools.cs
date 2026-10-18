@@ -26,6 +26,7 @@ public static class LipSyncProjectTools
         for (int model = 0; model < switcher.modelRoots.Length; ++model)
         {
             var root = switcher.modelRoots[model]; string modelName = model == 0 ? "test" : "girl";
+            if (root.GetComponent<VrmMouthDriver>() != null) continue; // VRM characters map vowels themselves.
             string path = "Assets/MyCharacter/Config/MouthProfiles/" + modelName + ".asset";
             var profile = AssetDatabase.LoadAssetAtPath<MouthProfile>(path);
             if (profile == null) { profile = ScriptableObject.CreateInstance<MouthProfile>(); AssetDatabase.CreateAsset(profile, path); }

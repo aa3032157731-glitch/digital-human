@@ -6,7 +6,7 @@ using UnityEngine;
 
 // Explicitly last: protect owned mouth channels from Animator and SALSA queue writes.
 [DefaultExecutionOrder(30000)]
-public sealed class AlignedMouthDriver : MonoBehaviour
+public sealed class AlignedMouthDriver : MonoBehaviour, IAlignedMouthTarget
 {
     public MouthProfile profile;
     public MouthTuning tuning = new MouthTuning();
@@ -26,6 +26,7 @@ public sealed class AlignedMouthDriver : MonoBehaviour
     private float jawValue;
     private float releaseBlend = 1;
     public bool HasMapping { get { Bind(); return bindings.Count > 0; } }
+    public MouthTuning Tuning => tuning;
 
     private void Bind()
     {

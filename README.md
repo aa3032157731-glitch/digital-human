@@ -223,6 +223,39 @@ VoiceChatSystem.AudioSource
 
 TTS 播放开始时 `VoiceChatController` 会把 Animator bool `isTalk` 设为 `true`，结束或打断时设为 `false`。如果 Animator 有 int 参数 `talkAnimationIndex`，每次开始说话会随机选择一个说话动作变体。
 
+## 界面与连接测试
+
+运行时界面全部由代码生成：`AssistantUi`（配色、圆角、按钮、开关、输入框、卡片等基础组件）+ `AssistantSettingsHub`（设置中心）+ `AssistantDashboard`（对话面板，消息以气泡显示，分“对话 / 历史 / 知识库”三个标签）。场景里的“切换场景”“退出”等按钮会被统一换成同样的样式；对话面板会自动停在“退出”按钮上方。
+
+每个服务账号的编辑页都有“测试连接”：用当前填写（尚未保存）的信息发起一次真实请求，结果显示在页面上，账号列表与卡片上也会标出“连接正常 / 测试未通过”。测试由 `ServiceConnectionTester` 完成，不保存任何配置：
+
+- 聊天服务：请求 `/models`；接口不提供模型列表时，用已选模型发送一条极短的消息。
+- 语音合成（Azure、豆包、讯飞）：合成“你好。”，收到第一段音频即判定可用。
+- 讯飞语音识别：建立签名连接并发送 0.2 秒静音。
+- 百度搜索：执行一次只取 1 条结果的搜索。
+
+常见失败（鉴权失败、区域不匹配、额度不足、网络不可达、讯飞错误码等）会翻译成中文提示，并附带原始信息。「意识」页另有“测试当前模型”，按当前模型参数实际请求一次。
+
+验证：`AssistantUiValidation.Run`（离线，含本地回环假服务）把各页面预览写到 `.work/ui-preview`；`AssistantScenePreview.Run` 用隔离的示例配置运行主场景并截图，不读取也不修改本机配置与聊天记录。
+
+## VRM 角色
+
+除 CC 角色 `test` / `girl` 外，可以加入 VRM（VRoid 等）角色，依赖 UniVRM `v0.131.3`（`com.vrmc.gltf`、`com.vrmc.vrm`，见 `Packages/manifest.json`）。
+
+1. 把 `.vrm` 放到 `Assets/MyCharacter/VRM/`。导入器固定使用 URP 材质（MToon10），VRM 0.x 会自动迁移为 1.0。
+2. 菜单 `Tools/Voice Chat/Install VRM Characters`：把每个文件实例化到 `main.unity`，追加到 `CharacterModelSwitcher`，挂 `VrmMouthDriver`，并复用当前 CC 角色的 Humanoid 说话 Animator。可重复运行，不会重复添加。
+3. 运行后用「切换模型」按钮在所有角色间轮换。
+
+VRM 只有 aa / ih / ou / ee / oh 五个元音表情，`VrmMouthDriver` 负责口型：
+
+- Azure 连续口型：`AlignedMouthPlayback` 通过 `IAlignedMouthTarget` 把 55 通道嘴部数据折算成五个元音。
+- 讯飞 / 豆包 / 普通 Azure：分析 TTS `AudioSource` 的响度和频谱，估计元音和张嘴幅度，不需要 SALSA。
+- 自动眨眼；强度、开合速度在组件 Inspector 中调整。
+
+安装工具会给 VRM 网格开启 `updateWhenOffscreen`：VRM 网格的包围盒相对静止的 `Root` 骨骼，而说话动画会让身体平移约 0.3 m，镜头只框住脸时脸会被剔除。
+
+验证：`-executeMethod VrmCharacterValidation.Run -vrmFolder <文件夹>` 在不保存的场景副本中检查安装结果、连续口型、音频口型，并在 `.work/vrm-test` 输出脸部截图（`.work/vrm-test/v_sent.wav` 存在时才做音频检查）。
+
 ## 情绪识别
 
 MoodMe 运行时由 `FaceDetector`、`ManageEmotionsNetwork`、`EmotionsManager` 组成，HUD 由 `MoodMeEmotionHudPresenter` 刷新。`VoiceChatController` 在用户按住说话键期间采样：
