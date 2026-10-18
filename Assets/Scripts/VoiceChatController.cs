@@ -217,6 +217,17 @@ public class VoiceChatController : MonoBehaviour
     [TextArea(2, 5)]
     public string currentKnowledgeBaseStatus;
 
+    [Header("RAG Retrieval")]
+    [Tooltip("Retrieve relevant knowledge-base passages for every turn instead of injecting the full knowledge base. Requires the Python retrieval service in Rag/.")]
+    public bool useRagRetrieval;
+
+    [Tooltip("Base URL of the retrieval service. Requests are sent to <url>/retrieve.")]
+    public string ragServiceUrl = "http://127.0.0.1:8000";
+
+    [Tooltip("Maximum knowledge-base passages retrieved for each turn.")]
+    [Range(1, 10)]
+    public int ragTopK = 3;
+
     [Header("Agent Tools")]
     [Tooltip("Let DeepSeek decide whether to call local tools before the final streamed answer.")]
     public bool enableAgentTools = true;
@@ -881,6 +892,9 @@ public class VoiceChatController : MonoBehaviour
             AppendUserMessage(userText);
             var conversation = BuildConversation(userText);
             var context = BuildRuntimeSystemContext(userText, conversation.Count);
+            var knowledge = await BuildRagContextAsync(conversation, userText, token);
+            if (!string.IsNullOrEmpty(knowledge))
+                context = string.IsNullOrEmpty(context) ? knowledge : context + "\n\n" + knowledge;
             record = BeginAssistantMessage(out session, out conversationGeneration);
             conversation = await ResolveAgentToolCallsAsync(service, conversation, context, userText, token);
             token.ThrowIfCancellationRequested();
@@ -1474,7 +1488,7 @@ public class VoiceChatController : MonoBehaviour
 
     private void EnsureInitialKnowledgeBaseInjected()
     {
-        if (!injectFullKnowledgeBaseOnNewConversation || !enablePersistentConversation || !enableKnowledgeBase)
+        if (useRagRetrieval || !injectFullKnowledgeBaseOnNewConversation || !enablePersistentConversation || !enableKnowledgeBase)
         {
             return;
         }
@@ -1862,7 +1876,7 @@ public class VoiceChatController : MonoBehaviour
             builder.AppendLine("你可以在最终回答前调用工具。请由你判断是否需要工具，不要让用户替你判断。");
             builder.AppendLine("如果用户问今天、现在、本周、本月、今年、当前日期或当前时间，必须先调用 get_current_datetime。");
             builder.AppendLine("如果用户问较新的事实、新闻、公告、政策、价格、天气、比赛、开放时间、官网信息或任何可能变化的信息，应调用 web_search。");
-            builder.AppendLine("如果用户问校园服务、北方工业大学、办事流程、校内规定或本地资料，应优先依据本会话已注入的本地知识库快照回答；资料不足时再调用 web_search。");
+            builder.AppendLine("如果用户问校园服务、北方工业大学、办事流程、校内规定或本地资料，应优先依据本地知识库资料回答；资料不足时再调用 web_search。");
             builder.AppendLine("最终回答只能基于用户问题、对话上下文和工具结果。没有工具结果时，不要声称已经联网或已经查询。");
             builder.AppendLine("工具结果可能是 JSON，回答时提炼成自然中文，不要原样输出 JSON。");
             builder.AppendLine();
@@ -1876,6 +1890,44 @@ public class VoiceChatController : MonoBehaviour
 
         var context = builder.ToString().Trim();
         return context;
+    }
+
+    // Passages only go into this turn's system context; they are never saved to the session, so the next turn retrieves again.
+    private async Task<string> BuildRagContextAsync(
+        List<ChatCompletionService.ChatMessage> conversation, string userText, CancellationToken token)
+    {
+        if (!useRagRetrieval || !enableKnowledgeBase) return string.Empty;
+        var query = RagRetrievalService.BuildQuery(conversation, userText);
+        ChatStatus = "正在检索知识库…";
+        try
+        {
+            var hits = await new RagRetrievalService(ragServiceUrl).RetrieveAsync(query, ragTopK, token);
+            var context = RagRetrievalService.FormatContext(hits);
+            SetKnowledgeStatus(hits.Count == 0
+                ? "RAG：本轮没有检索到相关资料"
+                : $"RAG：本轮检索到 {hits.Count} 段，最高相关度 {hits[0].score:F2}");
+            Debug.Log($"[RAG] 检索词：{query}\n{context}");
+            return context;
+        }
+        // A cancelled turn (stop button or a newer message) must stay cancelled instead of degrading.
+        catch (Exception ex) when (!token.IsCancellationRequested)
+        {
+            // Mono wraps connection errors as "An error occurred while sending the request"; the innermost message names the cause.
+            var reason = ex.GetBaseException().Message;
+            SetKnowledgeStatus("RAG 检索失败：" + reason);
+            Debug.LogWarning("[RAG] 检索失败：" + reason);
+            return "本地知识库检索服务暂时不可用。如果用户问的是校园资料，请告诉用户知识库服务没有启动，不要凭印象回答。";
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested) ChatStatus = "正在回答…";
+        }
+    }
+
+    private void SetKnowledgeStatus(string status)
+    {
+        currentKnowledgeBaseStatus = status;
+        EnqueueMainThread(() => onKnowledgeBaseChanged?.Invoke(status));
     }
 
     private async Task<List<ChatCompletionService.ChatMessage>> ResolveAgentToolCallsAsync(

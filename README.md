@@ -52,6 +52,7 @@ Unity 数字人语音交互项目。当前版本以 `main` 场景为核心，把
  -> XFASRService 通过讯飞中文 ASR WebSocket 识别
  -> 松开 Space 后得到最终文本
  -> VoiceChatController 汇总用户文本、会话记忆、知识库、情绪快照和工具上下文
+ -> 可选：RagRetrievalService 向 Rag/ 检索服务取本轮相关的知识库片段
  -> DeepSeekService 调用 DeepSeek Chat Completions
  -> 可选：DeepSeek 先调用 get_current_datetime / web_search 工具
  -> DeepSeek 流式输出文本
@@ -309,6 +310,18 @@ category / type
 
 默认行为是：新会话第一次用户发言前，把当前知识库完整快照作为隐藏 system 消息注入。涉及校园资料、流程、地点、联系方式等问题时，DeepSeek 会优先依据本地知识库；知识库不足时再考虑联网搜索。
 
+### 按问题检索（RAG，可选）
+
+`Rag/` 是配套的 Python 检索服务（BGE-M3 + Qdrant + FastAPI），启动、配置和评估见 [Rag/README.md](Rag/README.md)。在 设置 → 机体模块 → 知识库 勾选“按问题检索知识库（RAG）”后：
+
+- 每轮先 `POST {检索服务地址}/retrieve`，检索词是上一句用户消息加本句，用来照顾“那周末呢”这类追问。
+- 返回的片段只拼进本轮的 runtime system context，不写入会话文件，下一轮重新检索；新会话不再注入完整知识库快照。
+- 检索在工具决策之前完成，模型先看到本地资料，再决定是否需要 `web_search`。
+- 检索服务没开、出错或 5 秒无响应时降级为普通对话，并让模型说明知识库服务未启动；用户打断时仍走原有的 interrupted 流程。
+- 对话面板“知识库”标签显示本轮检索段数和最高相关度，或失败原因；Console 打印 `[RAG]` 检索词和拼好的资料。
+
+相关字段：`useRagRetrieval`（默认关闭）、`ragServiceUrl`（默认 `http://127.0.0.1:8000`，留空恢复默认）、`ragTopK`（默认 3，范围 1–10），保存在运行配置的 `knowledge` 段。旧配置读入时保持关闭，行为与完整注入模式一致。
+
 ## Agent 工具
 
 `VoiceChatController` 暴露给 DeepSeek 的本地工具：
@@ -340,6 +353,7 @@ https://qianfan.baidubce.com/v2/ai_search/web_search
 - `Assets/Scripts/Services/BaiduSearchService.cs`：百度千帆联网搜索。
 - `Assets/Scripts/Services/ChatHistoryStore.cs`：会话 JSON 存取和历史相关性召回。
 - `Assets/Scripts/Services/KnowledgeBaseStore.cs`：本地知识库扫描、JSON 扁平化和上下文生成。
+- `Assets/Scripts/Services/RagRetrievalService.cs`：调用 `Rag/` 检索服务的 `/retrieve`，生成追问检索词和本轮知识库上下文。
 - `Assets/Scripts/Config/VoiceChatRuntimeConfigStore.cs`：运行时配置文件加载、保存、应用和 schema 默认值。
 - `Assets/Scripts/UI/AdvancedSettingsPanel.cs`：运行时高级设置面板。
 - `Assets/Scripts/UI/VoiceChatMemoryPanel.cs`：会话和知识库状态面板。
@@ -417,7 +431,7 @@ https://qianfan.baidubce.com/v2/ai_search/web_search
 
 - `AzureTtsValidation.Run`：离线传输、SSML、随机 PCM 分包、加速模拟 10 分钟音频环、溢出、取消、配置迁移与场景绑定。异步入口会自行退出，不加 `-quit`。
 - `AzureTtsPlayModeValidation.Run`：加 `-forceAudio`，在空场景运行真实播放时钟和 AudioSource 输出检测，覆盖 100/300/1000ms 断流、跨环及 50 次打断。入口自行退出；不访问订阅。
-- `ChatFeatureValidation.Run`：先启动 `python Tools/chat_mock_server.py`，回归已有聊天功能，入口自行退出。
+- `ChatFeatureValidation.Run`：先启动 `python Tools/chat_mock_server.py`，回归已有聊天功能，并检查 RAG 片段送达模型、不写入历史、替代完整注入以及检索服务不可用时的降级，入口自行退出。
 - `AzureTtsBuildValidation.Build`：加 `-quit`，构建 Windows x64 开发版到项目旁 `garbage/AzureWindows/`。
 - `AzureTtsBuildValidation.Preview`：加 `-quit`，使用隔离的无密钥配置渲染设置页到项目旁 `garbage/`。
 - `AzureTtsSceneSetup.Install`：已执行并保存了实际场景；只有需要重新安装 Azure 控件时才运行此方法或相应 Tools 菜单。

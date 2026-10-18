@@ -243,6 +243,9 @@ public sealed class AssistantSettingsHub : MonoBehaviour
             case "refreshKnowledgeBaseOnStart": return "启动时刷新知识库";
             case "injectFullKnowledgeBaseOnNewConversation": return "新对话注入完整知识库";
             case "maxInitialKnowledgeBaseCharacters": return "首次注入最大字符数（0 为不限）";
+            case "useRagRetrieval": return "按问题检索知识库（RAG）";
+            case "ragServiceUrl": return "检索服务地址";
+            case "ragTopK": return "每轮检索片段数（1–10）";
             case "audioEncoding": return "音频编码";
             case "audioFormat": return "音频格式";
             case "textEncoding": return "文本编码";
@@ -639,7 +642,7 @@ public sealed class AssistantSettingsHub : MonoBehaviour
     {
         if (module == "意识") { ShowChat(); return; }
         if (module == "发声") { ShowSpeech(); return; }
-        string description = module == "听觉" ? "语音识别服务与麦克风参数。" : module == "网络搜索" ? "联网搜索账号、搜索参数与工具调用。" : module == "记忆" ? "对话如何保存、如何作为上下文召回。" : "本地知识库目录与注入方式。";
+        string description = module == "听觉" ? "语音识别服务与麦克风参数。" : module == "网络搜索" ? "联网搜索账号、搜索参数与工具调用。" : module == "记忆" ? "对话如何保存、如何作为上下文召回。" : "本地知识库目录、注入方式与按问题检索（RAG）。";
         BeginPage(module, "module", description, "modules", ShowModules, "机体模块");
         reopen = () => OpenModule(module);
         if (module == "听觉")

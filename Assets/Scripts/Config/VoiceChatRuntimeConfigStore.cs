@@ -260,6 +260,9 @@ public sealed class KnowledgeRuntimeSettings
     public bool refreshKnowledgeBaseOnStart = true;
     public bool injectFullKnowledgeBaseOnNewConversation = true;
     public int maxInitialKnowledgeBaseCharacters;
+    public bool useRagRetrieval;
+    public string ragServiceUrl = "http://127.0.0.1:8000";
+    public int ragTopK = 3;
 }
 
 [Serializable]
@@ -897,6 +900,9 @@ public static class VoiceChatRuntimeConfigStore
         target.refreshKnowledgeBaseOnStart = source.refreshKnowledgeBaseOnStart;
         target.injectFullKnowledgeBaseOnNewConversation = source.injectFullKnowledgeBaseOnNewConversation;
         target.maxInitialKnowledgeBaseCharacters = source.maxInitialKnowledgeBaseCharacters;
+        target.useRagRetrieval = source.useRagRetrieval;
+        target.ragServiceUrl = source.ragServiceUrl;
+        target.ragTopK = source.ragTopK;
     }
 
     private static void ApplyKnowledge(VoiceChatController target, KnowledgeRuntimeSettings source)
@@ -908,6 +914,9 @@ public static class VoiceChatRuntimeConfigStore
         target.refreshKnowledgeBaseOnStart = source.refreshKnowledgeBaseOnStart;
         target.injectFullKnowledgeBaseOnNewConversation = source.injectFullKnowledgeBaseOnNewConversation;
         target.maxInitialKnowledgeBaseCharacters = Mathf.Clamp(source.maxInitialKnowledgeBaseCharacters, 0, 100000);
+        target.useRagRetrieval = source.useRagRetrieval;
+        target.ragServiceUrl = string.IsNullOrWhiteSpace(source.ragServiceUrl) ? "http://127.0.0.1:8000" : source.ragServiceUrl.Trim();
+        target.ragTopK = Mathf.Clamp(source.ragTopK, 1, 10);
     }
 
     private static void CaptureAgentTools(VoiceChatController source, AgentToolRuntimeSettings target)
